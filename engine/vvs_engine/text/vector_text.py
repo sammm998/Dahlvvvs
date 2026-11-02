@@ -351,9 +351,12 @@ def vector_text_rows(page: RawPage, timing: dict | None = None, say=None) -> Vec
     clusters: list[RowCluster] = []
     marks: list[Mark] = []
     used_comp: set[str] = set()
+    singles: list[RowCluster] = []
     # process size families from largest count first; a component belongs to one family only
+    reserved: dict[str, float] = {}     # component -> largest text size a deferred lone glyph claimed it at
     for H in sizes:
-        avail = [c for c in comps if c.cid not in used_comp]
+        # smaller text may not take the strokes of a lone glyph a larger size already saw whole; larger may
+        avail = [c for c in comps if c.cid not in used_comp and reserved.get(c.cid, 0.0) <= H]
         rows = cluster_rows(page, avail, H, orientation_rows=clusters)
         for r in rows:
             if _is_mark(r):
@@ -364,11 +367,30 @@ def vector_text_rows(page: RawPage, timing: dict | None = None, say=None) -> Vec
                 # the unused-component pass below still records genuine marks.
                 continue
             # keep only rows that look like text: >=2 glyphs or a single glyph with plausible size
-            if len(r.glyphs) >= 2 or (len(r.glyphs) == 1 and max(r.glyphs[0].bbox[3] - r.glyphs[0].bbox[1], r.glyphs[0].bbox[2] - r.glyphs[0].bbox[0]) >= 0.5 * H):
+            if len(r.glyphs) >= 2:
                 clusters.append(r)
                 for g in r.glyphs:
                     for c in g.comps:
                         used_comp.add(c.cid)
+            elif len(r.glyphs) == 1 and max(r.glyphs[0].bbox[3] - r.glyphs[0].bbox[1], r.glyphs[0].bbox[2] - r.glyphs[0].bbox[0]) >= 0.5 * H:
+                # A lone glyph is only taken once every text size has had a turn. Seen by a smaller size family, a
+                # piece of a larger character - the bowl of a 5 drawn as three strokes - is a plausible glyph on
+                # its own, and claiming it there leaves the larger family half a character. Which family is the
+                # commonest decided how a figure read: the same 5 in the same stamp was '5' on one sheet and two
+                # '?' on the next (Årjäng, the scale bar 0-1-2-5 METER).
+                singles.append(r)
+                for g in r.glyphs:
+                    for c in g.comps:
+                        reserved[c.cid] = max(reserved.get(c.cid, 0.0), H)
+    # Where two lone glyphs claim the same strokes, the one that holds more of them is the character and the
+    # other is a piece of it; among equals the earlier size family keeps its turn.
+    order = sorted(range(len(singles)), key=lambda k: (-sum(len(g.comps) for g in singles[k].glyphs), k))
+    for r in (singles[k] for k in order):
+        if all(c.cid not in used_comp for g in r.glyphs for c in g.comps):
+            clusters.append(r)
+            for g in r.glyphs:
+                for c in g.comps:
+                    used_comp.add(c.cid)
     for c in comps:
         if c.cid in used_comp:
             continue

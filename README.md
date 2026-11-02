@@ -130,7 +130,16 @@ ratios elsewhere on such a sheet (a fall written 1:100) are not the stamp.
 **Verified means measured.** A scale is `VERIFIED` only when an independent measurement on the sheet - a scale bar
 read with its numbers, or dimension chains - confirms the stated ratio within 1 %. A bar whose numbers cannot be
 read gives points, not metres, and neither chooses nor confirms a ratio: on the Årjäng plans a hatched EI30 wall was
-taken for such a bar and "confirmed" 1:100 on A1 sheets drawn in 1:50, doubling every metre. A scale that is only
+taken for such a bar and "confirmed" 1:100 on A1 sheets drawn in 1:50, doubling every metre. Hatching - many
+parallel strokes of one length, closely and evenly spaced, with no numbering - is never a scale-bar candidate, even
+with figures standing beside it; `hatch_bands()` finds it on the sheet.
+
+The same plans carry the same labelled bar (0-1-2-5 METER) as the schematic, and it was missed for two reasons in
+the text reading, both fixed: a lone glyph was claimed by whichever text size was commonest on the sheet, so the
+bowl of the 5 became a "character" of the 4.5 pt legend text and the 5 was read as two '?' (lone glyphs are now
+taken after every size has had its turn, the one holding most strokes first); and a lone '0' was lent the 10 degree
+direction of nearby text, so the bar's labels did not line up (a one-character label is no longer held to its lent
+angle; the bar's axis is tried along each label beside it). A scale that is only
 stated (`TEXT_ONLY`) or only measured one way (`BAR_ONLY`, `DIMENSIONS_ONLY`) is still used, but every metre measured
 under it carries the row state `SCALE_UNVERIFIED` instead of `CONFIRMED`.
 

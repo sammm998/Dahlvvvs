@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -395,64 +396,6 @@ def _ratio_for_other_format(page: RawPage, t: ScaleEvidence) -> tuple[float, str
     return t.value * factor, other, fmt
 
 
-def _whole_metres(v: float) -> bool:
-    """A scale bar spans a whole number of metres - never 2.5 of them."""
-    return v >= 0.95 and abs(v - round(v)) <= 0.02 * max(v, 1.0)
-
-
-def find_tick_bar(page: RawPage) -> tuple[float, float] | None:
-    """A scale bar read as geometry, without reading the numbers under it.
-
-    A scale bar is a baseline with tick marks crossing it at one spacing. That much is drawn, and it survives
-    where the labels are too small for any reader: it gives the bar's drawn length and the length of one of its
-    divisions, which is enough to tell two printed ratios apart. Returns (division in points, bar length)."""
-    best = None
-    for p in page.paths:
-        if p.kind == "f":
-            continue
-        for s in p.segs:
-            if not (30.0 <= s.length <= 900.0):
-                continue
-            ang = s.angle % 180.0
-            if min(ang, 180.0 - ang) > 2.0 and abs(ang - 90.0) > 2.0:
-                continue                    # a scale bar lies along the sheet
-            d, n = row_axes(ang if min(ang, 180 - ang) <= 2.0 else 0.0)
-            base = project(s.mid, n)
-            lo = min(project((s.x0, s.y0), d), project((s.x1, s.y1), d))
-            hi = max(project((s.x0, s.y0), d), project((s.x1, s.y1), d))
-            ticks: list[float] = []
-            for q in page.paths:
-                if q.kind == "f":
-                    continue
-                for t in q.segs:
-                    if not (1.5 <= t.length <= 30.0):
-                        continue
-                    a0 = project((t.x0, t.y0), n); a1 = project((t.x1, t.y1), n)
-                    if abs(a1 - a0) < 0.6 * t.length:
-                        continue            # not across the baseline
-                    if not (min(a0, a1) - 1.0 <= base <= max(a0, a1) + 1.0):
-                        continue
-                    c = project(t.mid, d)
-                    if lo - 1.0 <= c <= hi + 1.0:
-                        ticks.append(c)
-            ticks.sort()
-            merged: list[float] = []
-            for c in ticks:
-                if not merged or c - merged[-1] > 1.0:
-                    merged.append(c)
-            if len(merged) < 5:
-                continue
-            gaps = [merged[i + 1] - merged[i] for i in range(len(merged) - 1)]
-            step = max(gaps)
-            major = [g for g in gaps if abs(g - step) <= 0.05 * step]
-            if len(major) < 3 or sum(major) < 0.6 * (hi - lo):
-                continue                    # the ticks do not divide the bar evenly
-            span = hi - lo
-            if best is None or span > best[1]:
-                best = (step, span)
-    return best
-
-
 def _unit_beside(units: list[_Label], a: _Label, d, n, span_p: float) -> str | None:
     """Enheten skriven som ett eget ord vid stockens ände: `0 1 2 3 4 5   m`.
 
@@ -553,122 +496,255 @@ def _find_scale_bar(page: RawPage, lines: list[TextRow]) -> ScaleEvidence | None
     for i, a in enumerate(nums):
         if a.value != 0.0 or a.text.strip().strip("0.,") not in ("", "0"):
             continue
-        d, n = row_axes(a.angle)
         H = max(a.height, 1)
-        # collect labels aligned with 'a' along d within 400 pt
-        cands = []
-        for j in idx.query(bbox_expand(a.bbox, 420)):
-            b = nums[j]
-            if abs(((b.angle - a.angle) + 180) % 360 - 180) > 3 or abs(b.height - a.height) > 0.3 * H:
+        near = [nums[j] for j in idx.query(bbox_expand(a.bbox, 420))]
+        # A label of one character has no reading direction of its own - the reader lends it the direction of
+        # the nearest text, and on a sheet that also writes at 10 degrees a lone '0' under a level bar came out
+        # at 10 degrees while the '2' and '5' beside it stood level (Årjäng W-50-1-1000). The bar's axis is
+        # therefore tried along the direction of each label near it, and a one-character label is not held to
+        # its own lent angle.
+        axes: list[float] = []
+        for lbl in [a, *near]:
+            if not any(abs(((lbl.angle - x) + 180) % 360 - 180) <= 3 for x in axes):
+                axes.append(lbl.angle)
+        for axis in axes:
+            if not _lone_char(a) and abs(((a.angle - axis) + 180) % 360 - 180) > 3:
                 continue
-            if abs(project((b.cx, b.cy), n) - project((a.cx, a.cy), n)) > 0.6 * H:
-                continue
-            cands.append((project((b.cx, b.cy), d) - project((a.cx, a.cy), d), b.value, b))
-        cands = sorted((c for c in cands if c[0] >= -0.5), key=lambda c: (c[0], c[1]))
-        if len(cands) < 3:
-            continue
-        # equal spacing check: value proportional to position
-        vals = [c[1] for c in cands]; pos = [c[0] for c in cands]
-        if vals != sorted(vals) or len(set(vals)) < 3:
-            continue
-        span_v = vals[-1] - vals[0]; span_p = pos[-1] - pos[0]
-        if span_v <= 0 or span_p <= 20:
-            continue
-        k = span_p / span_v
-        ok = all(abs(pos[m] - vals[m] * k) <= 0.35 * H + 0.03 * span_p for m in range(len(vals)))
-        if not ok:
-            continue
-        # a bar/line must exist near the labels: strokes parallel to d within 3H whose extents cover >= 60 % of the
-        # label span (one long stroke, or collinear pieces of a segmented / rasterised bar)
-        bar_found = False
-        covered: list[tuple[float, float]] = []
-        extent: list[tuple[float, float]] = []       # unclipped, to measure the bar's own drawn length
-        lo, hi = project((a.cx, a.cy), d), project((a.cx, a.cy), d) + span_p
-        for p in page.paths:
-            if p.kind == "f":
-                continue
-            for s in p.segs:
-                if s.length < 4.0:
-                    continue
-                ang = s.angle
-                if min(abs(ang - a.angle % 180), 180 - abs(ang - a.angle % 180)) > 3:
-                    continue
-                off = abs(project(s.mid, n) - project((a.cx, a.cy), n))
-                if off > 3 * H:
-                    continue
-                p0, p1 = sorted((project((s.x0, s.y0), d), project((s.x1, s.y1), d)))
-                if p1 < lo - 5 or p0 > hi + 5:
-                    continue
-                covered.append((max(p0, lo), min(p1, hi)))
-                extent.append((p0, p1))
-        covered.sort()
-        total = 0.0
-        cur_lo, cur_hi = None, None
-        bar_lo, bar_hi = None, None
-        for p0, p1 in covered:
-            if cur_lo is None or p0 > cur_hi:
-                if cur_lo is not None:
-                    total += cur_hi - cur_lo
-                cur_lo, cur_hi = p0, p1
-            else:
-                cur_hi = max(cur_hi, p1)
-        for p0, p1 in extent:
-            bar_lo = p0 if bar_lo is None else min(bar_lo, p0)
-            bar_hi = p1 if bar_hi is None else max(bar_hi, p1)
-        if cur_lo is not None:
-            total += cur_hi - cur_lo
-        bar_found = total >= 0.6 * span_p
-        if not bar_found:
-            continue
-        # the bar's own drawn extent is the measurement; the label centres only say which values its ends carry
-        # (a glyph centre sits a fraction of a character off the graduation it labels). Use the extent whenever
-        # both ends of the bar coincide with the outer labels within half a graduation.
-        span_used, ref = span_p, "label_centres"
-        # en gradering är avståndet mellan två etiketter på pappret - inte skillnaden mellan deras tal. Räknat
-        # på talen blev graderingen försvinnande liten så fort stocken var skriven i mm eller cm, och stockens
-        # egen ritade längd användes då aldrig.
-        step = span_p / max(len(vals) - 1, 1)
-        if bar_lo is not None and abs(bar_lo - lo) <= 0.5 * step and abs(bar_hi - hi) <= 0.5 * step and bar_hi - bar_lo > 20:
-            span_used, ref = bar_hi - bar_lo, "bar_extent"
-        # Enheten: den ritningen skriver ut, annars den som gör skalan rimlig.
-        #
-        # Skriver stocken ut sin enhet - `5 m`, `5000 mm`, `500 cm` - är det ritningens besked, och det gäller.
-        # Att tolka om ett värde med enhet till en annan enhet är ett fel på tusen gånger i varje meter bladet
-        # mäter, och det syns inte i något tal. Ger den utskrivna enheten en orimlig skala läses stocken inte
-        # alls, hellre än att den läses i en enhet ritningen inte skrev.
-        #
-        # Står ingen enhet någonstans gissas den, som förut: meter först, och den enhet som ger en rimlig skala
-        # om metertolkningen inte gör det.
-        stated = {c[2].unit for c in cands if c[2].unit}
-        if len(stated) > 1:
-            continue                 # stocken skriver två enheter: den säger inte vilken som gäller
-        told = next(iter(stated), None) or _unit_beside(units, a, d, n, span_p)
-        per = {"m": 1.0, "dm": 0.1, "cm": 0.01, "mm": 0.001}
-        if told:
-            mpp = span_v * per[told] / span_used
-            ratio = mpp * 1000.0 / MM_PER_PT
-            if not (5 <= ratio <= 5000):
-                continue
-            unit = told
-        else:
-            mpp = span_v / span_used     # meters per pt if labels are meters
-            ratio = mpp * 1000.0 / MM_PER_PT
-            unit = "m"
-            if ratio < 5 or ratio > 5000:
-                for u in ("dm", "cm", "mm"):
-                    cand_mpp = span_v * per[u] / span_used
-                    cand_ratio = cand_mpp * 1000.0 / MM_PER_PT
-                    if 5 <= cand_ratio <= 5000:
-                        mpp, unit, ratio = cand_mpp, u, cand_ratio
-                        break
-                else:
-                    continue
-        cand = ScaleEvidence(kind="scale_bar", text=" ".join(str(v) for v in vals), bbox=[round(v, 1) for v in (min(c[2].bbox[0] for c in cands), min(c[2].bbox[1] for c in cands), max(c[2].bbox[2] for c in cands), max(c[2].bbox[3] for c in cands))],
-                             value=mpp, detail={"labels": vals, "span_pt": round(span_p, 2), "measured_from": ref, "bar_extent_pt": round(span_used, 2),
-                                               "unit": unit, "implied_ratio": round(ratio, 1), "n_labels": len(vals)})
-        if best is None or len(vals) > best.detail["n_labels"]:
-            best = cand
+            cand = _bar_along(page, a, near, axis, H, units)
+            if cand is not None and (best is None or cand.detail["n_labels"] > best.detail["n_labels"]):
+                best = cand
     return best
+
+
+# Skraffering: många parallella, lika långa, tätt och jämnt placerade linjer utan siffror. En skalstocks
+# delstreck är vinkelräta mot stocken och parallella med varandra, men de är olika långa (hela, halva, fina
+# delar) och sitter tätt bara över en del av stocken - därför skiljer längden, jämnheten och täckningen dem åt.
+HATCH_MIN_LINES = 8           # många
+HATCH_PARALLEL_DEG = 2.0      # parallella
+HATCH_LENGTH_TOL = 0.05       # lika långa: inom 5 % av medianlängden
+HATCH_SPACING_TOL = 0.10      # jämnt placerade: ett mellanrum inom 10 % av medianmellanrummet...
+HATCH_EVEN_SHARE = 0.8        # ...för minst 80 % av mellanrummen (avbrott där en linje korsar är tillåtna)
+HATCH_DENSE = 2.0             # tätt: mellanrummet högst två strecklängder
+HATCH_COVER = 0.8             # och strecken täcker större delen av bandet
+SCALE_BAR_MIN_LABELS = 3      # en skalstock har minst tre tal; ett band med färre är inte numrerat
+
+
+def _is_hatching(strokes: list[Seg], d, span: float) -> bool:
+    """Do these strokes, crossing a band that runs along `d` for `span` points, make a hatch rather than a
+    scale's graduations? Spacing and reach are measured along the band."""
+    if len(strokes) < HATCH_MIN_LINES or span <= 0:
+        return False
+    # The hatch is the dominant group: strokes at the commonest angle and of the commonest length. A real hatch
+    # also has strokes clipped where the wall ends or a line crosses it; they do not make it something else.
+    def _ang(s: Seg) -> float:
+        return s.angle % 180
+
+    ang0 = Counter(round(_ang(s)) for s in strokes).most_common(1)[0][0]
+    par = [s for s in strokes if min(abs(_ang(s) - ang0), 180 - abs(_ang(s) - ang0)) <= HATCH_PARALLEL_DEG]
+    if len(par) < HATCH_MIN_LINES:
+        return False
+    len0 = Counter(round(s.length, 1) for s in par).most_common(1)[0][0]
+    group = [s for s in par if abs(s.length - len0) <= HATCH_LENGTH_TOL * len0]
+    if len(group) < HATCH_MIN_LINES:
+        return False
+    med = len0
+    pos = sorted(project(s.mid, d) for s in group)
+    gaps = sorted(pos[i + 1] - pos[i] for i in range(len(pos) - 1))
+    step = gaps[len(gaps) // 2]
+    if step <= 0 or step > HATCH_DENSE * med:
+        return False
+    # evenly spaced: most gaps are the hatch's own step; a hatch interrupted where a line crosses it is still
+    # a hatch, so a few long gaps are allowed
+    even = sum(1 for g in gaps if abs(g - step) <= HATCH_SPACING_TOL * step)
+    if even < HATCH_EVEN_SHARE * len(gaps):
+        return False
+    return pos[-1] - pos[0] >= HATCH_COVER * span
+
+
+def _crossing_strokes(page: RawPage, a: _Label, d, n, lo: float, hi: float, H: float) -> list[Seg]:
+    """Short strokes that cross the band along `d` near label `a` between `lo` and `hi` (along d)."""
+    base = project((a.cx, a.cy), n)
+    out: list[Seg] = []
+    for p in page.paths:
+        if p.kind == "f":
+            continue
+        for s in p.segs:
+            if not (1.0 <= s.length <= 4 * H):
+                continue
+            c = project(s.mid, d)
+            if not (lo - 1.0 <= c <= hi + 1.0):
+                continue
+            a0, a1 = project((s.x0, s.y0), n), project((s.x1, s.y1), n)
+            if abs(a1 - a0) < 0.5 * s.length:
+                continue            # runs along the band, not across it
+            if abs((a0 + a1) / 2 - base) > 4 * H:
+                continue
+            out.append(s)
+    return out
+
+
+def hatch_bands(page: RawPage, lines: list[TextRow]) -> list[tuple[float, float, float, float]]:
+    """Bands of hatching on the sheet: a long straight stroke crossed along most of its length by strokes that
+    make a hatch (`_is_hatching`), with no figure written in the band. Such a band is never a scale bar."""
+    nums = _numeric_words(lines)
+    out: list[tuple[float, float, float, float]] = []
+    for p in page.paths:
+        if p.kind == "f":
+            continue
+        for s in p.segs:
+            if not (30.0 <= s.length <= 2000.0):
+                continue
+            d, n = row_axes(s.angle)
+            lo = min(project((s.x0, s.y0), d), project((s.x1, s.y1), d))
+            hi = max(project((s.x0, s.y0), d), project((s.x1, s.y1), d))
+            base = project(s.mid, n)
+            cross: list[Seg] = []
+            for q in page.paths:
+                if q.kind == "f":
+                    continue
+                for t in q.segs:
+                    if not (1.0 <= t.length <= 30.0):
+                        continue
+                    c = project(t.mid, d)
+                    if not (lo - 1.0 <= c <= hi + 1.0):
+                        continue
+                    a0, a1 = project((t.x0, t.y0), n), project((t.x1, t.y1), n)
+                    if abs(a1 - a0) < 0.5 * t.length or not (min(a0, a1) - 1.0 <= base <= max(a0, a1) + 1.0):
+                        continue
+                    cross.append(t)
+            if not _is_hatching(cross, d, hi - lo):
+                continue
+            reach = max(t.length for t in cross)
+            box = (min(s.x0, s.x1) - reach, min(s.y0, s.y1) - reach, max(s.x0, s.x1) + reach, max(s.y0, s.y1) + reach)
+            inside = sum(1 for w in nums if box[0] <= w.cx <= box[2] and box[1] <= w.cy <= box[3])
+            if inside >= SCALE_BAR_MIN_LABELS:
+                continue            # numbered like a scale: not hatching by this definition
+            out.append(tuple(round(v, 1) for v in box))
+    return out
+
+
+def _lone_char(lbl: _Label) -> bool:
+    return len(lbl.text.strip()) == 1
+
+
+def _bar_along(page: RawPage, a: _Label, near: list[_Label], axis: float, H: float,
+               units: list[_Label]) -> ScaleEvidence | None:
+    """The scale bar whose zero label is `a`, read along `axis`, or None."""
+    d, n = row_axes(axis)
+    # collect labels aligned with 'a' along d within 400 pt
+    cands = []
+    for b in near:
+        if (not _lone_char(b) and abs(((b.angle - axis) + 180) % 360 - 180) > 3) or abs(b.height - a.height) > 0.3 * H:
+            continue
+        if abs(project((b.cx, b.cy), n) - project((a.cx, a.cy), n)) > 0.6 * H:
+            continue
+        cands.append((project((b.cx, b.cy), d) - project((a.cx, a.cy), d), b.value, b))
+    cands = sorted((c for c in cands if c[0] >= -0.5), key=lambda c: (c[0], c[1]))
+    if len(cands) < 3:
+        return None
+    # equal spacing check: value proportional to position
+    vals = [c[1] for c in cands]; pos = [c[0] for c in cands]
+    if vals != sorted(vals) or len(set(vals)) < 3:
+        return None
+    span_v = vals[-1] - vals[0]; span_p = pos[-1] - pos[0]
+    if span_v <= 0 or span_p <= 20:
+        return None
+    k = span_p / span_v
+    ok = all(abs(pos[m] - vals[m] * k) <= 0.35 * H + 0.03 * span_p for m in range(len(vals)))
+    if not ok:
+        return None
+    # a bar/line must exist near the labels: strokes parallel to d within 3H whose extents cover >= 60 % of the
+    # label span (one long stroke, or collinear pieces of a segmented / rasterised bar)
+    bar_found = False
+    covered: list[tuple[float, float]] = []
+    extent: list[tuple[float, float]] = []       # unclipped, to measure the bar's own drawn length
+    lo, hi = project((a.cx, a.cy), d), project((a.cx, a.cy), d) + span_p
+    for p in page.paths:
+        if p.kind == "f":
+            continue
+        for s in p.segs:
+            if s.length < 4.0:
+                continue
+            ang = s.angle
+            if min(abs(ang - axis % 180), 180 - abs(ang - axis % 180)) > 3:
+                continue
+            off = abs(project(s.mid, n) - project((a.cx, a.cy), n))
+            if off > 3 * H:
+                continue
+            p0, p1 = sorted((project((s.x0, s.y0), d), project((s.x1, s.y1), d)))
+            if p1 < lo - 5 or p0 > hi + 5:
+                continue
+            covered.append((max(p0, lo), min(p1, hi)))
+            extent.append((p0, p1))
+    covered.sort()
+    total = 0.0
+    cur_lo, cur_hi = None, None
+    bar_lo, bar_hi = None, None
+    for p0, p1 in covered:
+        if cur_lo is None or p0 > cur_hi:
+            if cur_lo is not None:
+                total += cur_hi - cur_lo
+            cur_lo, cur_hi = p0, p1
+        else:
+            cur_hi = max(cur_hi, p1)
+    for p0, p1 in extent:
+        bar_lo = p0 if bar_lo is None else min(bar_lo, p0)
+        bar_hi = p1 if bar_hi is None else max(bar_hi, p1)
+    if cur_lo is not None:
+        total += cur_hi - cur_lo
+    bar_found = total >= 0.6 * span_p
+    if not bar_found:
+        return None
+    # A hatched wall under a row of numbers (grid axes, room numbers) is not a scale bar, whatever stands near it.
+    if _is_hatching(_crossing_strokes(page, a, d, n, lo, hi, H), d, hi - lo):
+        return None
+    # the bar's own drawn extent is the measurement; the label centres only say which values its ends carry
+    # (a glyph centre sits a fraction of a character off the graduation it labels). Use the extent whenever
+    # both ends of the bar coincide with the outer labels within half a graduation.
+    span_used, ref = span_p, "label_centres"
+    # en gradering är avståndet mellan två etiketter på pappret - inte skillnaden mellan deras tal. Räknat
+    # på talen blev graderingen försvinnande liten så fort stocken var skriven i mm eller cm, och stockens
+    # egen ritade längd användes då aldrig.
+    step = span_p / max(len(vals) - 1, 1)
+    if bar_lo is not None and abs(bar_lo - lo) <= 0.5 * step and abs(bar_hi - hi) <= 0.5 * step and bar_hi - bar_lo > 20:
+        span_used, ref = bar_hi - bar_lo, "bar_extent"
+    # Enheten: den ritningen skriver ut, annars den som gör skalan rimlig.
+    #
+    # Skriver stocken ut sin enhet - `5 m`, `5000 mm`, `500 cm` - är det ritningens besked, och det gäller.
+    # Att tolka om ett värde med enhet till en annan enhet är ett fel på tusen gånger i varje meter bladet
+    # mäter, och det syns inte i något tal. Ger den utskrivna enheten en orimlig skala läses stocken inte
+    # alls, hellre än att den läses i en enhet ritningen inte skrev.
+    #
+    # Står ingen enhet någonstans gissas den, som förut: meter först, och den enhet som ger en rimlig skala
+    # om metertolkningen inte gör det.
+    stated = {c[2].unit for c in cands if c[2].unit}
+    if len(stated) > 1:
+        return None                 # stocken skriver två enheter: den säger inte vilken som gäller
+    told = next(iter(stated), None) or _unit_beside(units, a, d, n, span_p)
+    per = {"m": 1.0, "dm": 0.1, "cm": 0.01, "mm": 0.001}
+    if told:
+        mpp = span_v * per[told] / span_used
+        ratio = mpp * 1000.0 / MM_PER_PT
+        if not (5 <= ratio <= 5000):
+            return None
+        unit = told
+    else:
+        mpp = span_v / span_used     # meters per pt if labels are meters
+        ratio = mpp * 1000.0 / MM_PER_PT
+        unit = "m"
+        if ratio < 5 or ratio > 5000:
+            for u in ("dm", "cm", "mm"):
+                cand_mpp = span_v * per[u] / span_used
+                cand_ratio = cand_mpp * 1000.0 / MM_PER_PT
+                if 5 <= cand_ratio <= 5000:
+                    mpp, unit, ratio = cand_mpp, u, cand_ratio
+                    break
+            else:
+                return None
+    cand = ScaleEvidence(kind="scale_bar", text=" ".join(str(v) for v in vals), bbox=[round(v, 1) for v in (min(c[2].bbox[0] for c in cands), min(c[2].bbox[1] for c in cands), max(c[2].bbox[2] for c in cands), max(c[2].bbox[3] for c in cands))],
+                         value=mpp, detail={"labels": vals, "span_pt": round(span_p, 2), "measured_from": ref, "bar_extent_pt": round(span_used, 2),
+                                           "unit": unit, "implied_ratio": round(ratio, 1), "n_labels": len(vals)})
+    return cand
 
 
 # ---------------------------------------------------------------- the scale measured on the pipes themselves

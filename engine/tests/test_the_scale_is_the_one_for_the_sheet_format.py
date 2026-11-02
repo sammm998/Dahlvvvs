@@ -17,7 +17,7 @@ import pymupdf
 import pytest
 
 from vvs_engine.measure.measure import scale_standing
-from vvs_engine.measure.scale import VERIFY_TOL, ScaleResult, discover_scale, find_tick_bar
+from vvs_engine.measure.scale import VERIFY_TOL, ScaleResult, discover_scale, hatch_bands
 from vvs_engine.pdf.extract import extract_document
 from vvs_engine.pipeline import searchable_rows
 
@@ -30,7 +30,22 @@ def _ratio(sc: ScaleResult) -> float:
     return sc.meters_per_pt * 1000 / MM_PER_PT
 
 
-def _sheet(path, size, stamps, hatched_wall=False, notes=()):
+def _scale_bar(page, x0, y0, metres_per_pt, labels=(0, 2, 5)):
+    """En märkt skalstock: baslinje, hela och halva delstreck, siffror under."""
+    length = max(labels) / metres_per_pt
+    page.draw_line((x0, y0), (x0 + length, y0), width=0.5, color=(0, 0, 0))
+    for k in range(int(max(labels)) + 1):
+        x = x0 + k / metres_per_pt
+        page.draw_line((x, y0 - 5), (x, y0 + 5), width=0.5, color=(0, 0, 0))
+        if k < max(labels):
+            xh = x + 0.5 / metres_per_pt
+            page.draw_line((xh, y0 - 3), (xh, y0 + 3), width=0.5, color=(0, 0, 0))
+    for v in labels:
+        page.insert_text((x0 + v / metres_per_pt - 2, y0 + 16), str(v), fontsize=9, fontname="helv")
+    page.insert_text((x0 - 2, y0 + 30), "METER", fontsize=9, fontname="helv")
+
+
+def _sheet(path, size, stamps, hatched_wall=False, notes=(), bar=None, numbered_wall=False):
     doc = pymupdf.open()
     page = doc.new_page(width=size[0], height=size[1])
     page.draw_line((100, 300), (900, 300), width=1.44, color=(0, 0, 0))     # en ledning
@@ -47,6 +62,12 @@ def _sheet(path, size, stamps, hatched_wall=False, notes=()):
             x = x0 + k * step
             page.draw_line((x - 4, y0 + 4), (x + 4, y0 - 4), width=0.18, color=(0, 0, 0))
             k += 1
+    if numbered_wall:
+        # siffror 0 2 5 under väggen, som rutnätsaxlar: väggen blir ändå ingen skalstock
+        for v, dx in ((0, 0.0), (2, 200.0), (5, 500.0)):
+            page.insert_text((686.2 + dx, 1103.1 + 16), str(v), fontsize=9, fontname="helv")
+    if bar is not None:
+        _scale_bar(page, *bar)
     doc.save(path)
     doc.close()
     return path
@@ -82,9 +103,30 @@ def test_a_ratio_for_another_format_is_rescaled_not_taken_as_is(tmp_path):
 
 def test_a_hatched_wall_neither_chooses_nor_confirms_a_scale(tmp_path):
     pg, sc = _read(tmp_path, "wall", A1, ["SKALA 1:100 (A3)"], hatched_wall=True)
-    assert find_tick_bar(pg) is not None, "provet ska innehålla fällan: en vägg som ser ut som en omärkt stock"
+    lines = searchable_rows(pg)
+    assert any(b[1] < 1103.1 < b[3] for b in hatch_bands(pg, lines)), "väggen ska kännas igen som skraffering"
     assert abs(_ratio(sc) - 50) < 0.05, sc.reason
     assert sc.state != "VERIFIED", sc.reason
+
+
+def test_a_hatched_wall_with_figures_beside_it_is_not_a_scale_bar(tmp_path):
+    # siffror 0, 2, 5 i rätt avstånd under en skrafferad vägg: stocksökningen ska inte bygga en stock på väggen
+    _, sc = _read(tmp_path, "numbered", A1, ["SKALA 1:50 (A1)"], hatched_wall=True, numbered_wall=True)
+    assert not [e for e in sc.evidence if e.kind == "scale_bar"], sc.evidence
+    assert sc.state == "TEXT_ONLY", sc.reason
+
+
+def test_a_labelled_scale_bar_verifies_the_stated_ratio(tmp_path):
+    mpp = 50 * MM_PER_PT / 1000
+    _, sc = _read(tmp_path, "bar", A1, ["SKALA 1:100 (A3)"], bar=(1637.0, 1550.0, mpp))
+    assert sc.state == "VERIFIED", sc.reason
+    assert abs(_ratio(sc) - 50) < 0.05, sc.reason
+
+
+def test_a_scale_bar_is_never_read_as_hatching(tmp_path):
+    mpp = 50 * MM_PER_PT / 1000
+    pg, _ = _read(tmp_path, "barhatch", A1, ["SKALA 1:50 (A1)"], bar=(1637.0, 1550.0, mpp))
+    assert not [b for b in hatch_bands(pg, searchable_rows(pg)) if b[1] < 1550.0 < b[3]]
 
 
 def test_format_tied_ratios_that_disagree_are_a_conflict(tmp_path):
@@ -115,7 +157,7 @@ def test_verification_tolerance_is_one_percent():
 # Ritningarna är kundmaterial och ligger utanför repot. Manifestet anger blad och förväntad skala:
 #   data/local_facit/scale.json (eller VVS_LOCAL_SCALE_FACIT):
 #   {"sheets": [{"name": "W-50-1-1000", "pdf": "/sökväg/ritningar.pdf", "page": 1, "ratio": 50,
-#                "state": "TEXT_ONLY"}, ...]}
+#                "state": "VERIFIED", "scale_bar_bbox": [x0, y0, x1, y1], "hatch_points": [[x, y], ...]}, ...]}
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LOCAL_FACIT = os.environ.get("VVS_LOCAL_SCALE_FACIT", os.path.join(ROOT, "data", "local_facit", "scale.json"))
@@ -128,12 +170,28 @@ def _local_sheets():
         return [s for s in json.load(fh).get("sheets", []) if os.path.isfile(s.get("pdf", ""))]
 
 
+def _overlaps(a, b):
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
 @pytest.mark.skipif(not _local_sheets(), reason="lokalt skalfacit saknas (data/local_facit/scale.json)")
 @pytest.mark.parametrize("sheet", _local_sheets(), ids=lambda s: s.get("name", "blad"))
 def test_local_sheet_is_read_in_its_stated_scale(sheet):
+    """Varje blad i manifestet: skala och tillstånd enligt facit; har bladet en skalstock ska den vara läst
+    där facit säger (`scale_bar_bbox`); ingen skraffering får bli stockkandidat, och skrafferingar facit pekar ut
+    (`hatch_points`) ska kännas igen som skraffering."""
     from vvs_engine.pipeline import analyze_page
-    pa = analyze_page(extract_document(sheet["pdf"]).pages[sheet["page"]])
+    page = extract_document(sheet["pdf"]).pages[sheet["page"]]
+    pa = analyze_page(page)
     assert pa.scale.meters_per_pt is not None, pa.scale.reason
     ratio = _ratio(pa.scale)
     assert abs(ratio / sheet["ratio"] - 1) <= VERIFY_TOL, (sheet["name"], ratio, pa.scale.reason)
     assert pa.scale.state == sheet["state"], (sheet["name"], pa.scale.state, pa.scale.reason)
+    bars = [e for e in pa.scale.evidence if e.kind == "scale_bar"]
+    if sheet.get("scale_bar_bbox"):
+        assert any(_overlaps(e.bbox, sheet["scale_bar_bbox"]) for e in bars), (sheet["name"], [e.bbox for e in bars])
+    bands = hatch_bands(page, pa.lines)
+    for e in bars:
+        assert not any(_overlaps(e.bbox, b) for b in bands), (sheet["name"], "skraffering blev stock", e.bbox)
+    for x, y in sheet.get("hatch_points", []):
+        assert any(b[0] <= x <= b[2] and b[1] <= y <= b[3] for b in bands), (sheet["name"], "skraffering missad", x, y)
