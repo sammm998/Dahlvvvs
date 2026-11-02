@@ -278,15 +278,21 @@ class PipeMeasure:
 # med sitt tal, för den som granskar behöver se vad stocken gav, men den får inte heta bekräftad. Skillnaden
 # mellan de två är hela skillnaden mellan ett mått och en gissning på tusen gånger fel.
 SETTLED_SCALE = ("VERIFIED", "TEXT_ONLY", "BAR_ONLY", "DIMENSIONS_ONLY")
+# Avgjord är inte bekräftad. Bara VERIFIED - bladets påstådda skala bekräftad av en oberoende mätning på bladet
+# inom 1 % - ger raden CONFIRMED. En skala som bladet själv säger men ingenting mätt (TEXT_ONLY), eller som bara
+# mätts på ett sätt (BAR_ONLY, DIMENSIONS_ONLY), ger mätta meter med raden SCALE_UNVERIFIED.
+UNVERIFIED_ROW_STATE = "SCALE_UNVERIFIED"
 UNSETTLED_ROW_STATE = {"CONFLICT": "SCALE_UNSETTLED", "FROM_THE_SET": "SCALE_FROM_THE_SET",
-                       "GIVEN_BY_HAND": "SCALE_GIVEN_BY_HAND", "FROM_PIPES": "SCALE_FROM_PIPES"}
+                       "GIVEN_BY_HAND": "SCALE_GIVEN_BY_HAND", "FROM_PIPES": "SCALE_FROM_PIPES",
+                       "TEXT_ONLY": UNVERIFIED_ROW_STATE, "BAR_ONLY": UNVERIFIED_ROW_STATE,
+                       "DIMENSIONS_ONLY": UNVERIFIED_ROW_STATE}
 HATCHED_ONLY = "IN_HATCHED_AREA"        # hela stråket ligger inne i en skraffering: ritat, men inte det här bladets
 FROM_IMAGE = "READ_FROM_IMAGE"          # mätt på ett blad läst ur en bild: uppmätt, men bekräftad först av en person
 
 
 def scale_standing(scale: ScaleResult) -> str | None:
-    """Radens tillstånd när skalan inte är bladets eget besked - annars None, och raden får heta bekräftad."""
-    if scale.state in SETTLED_SCALE or scale.meters_per_pt is None:
+    """Radens tillstånd när skalan inte är verifierad - annars None, och raden får heta bekräftad."""
+    if scale.state == "VERIFIED" or scale.meters_per_pt is None:
         return None
     return UNSETTLED_ROW_STATE.get(scale.state)
 

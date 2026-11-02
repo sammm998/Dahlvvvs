@@ -122,6 +122,22 @@ off the graduations (that error was 0.95 % on these drawings). When a sheet stat
 ("SKALA A1 (A3)" over "1:50 (1:100)"), the k-th format belongs to the k-th ratio and the sheet's own size selects
 the one that applies. Two ratios with nothing to separate them stay a CONFLICT and no scale is assumed.
 
+Ratios tied to a format in the stamp ("1:50 (A1) 1:100 (A3)") are chosen by the sheet's own format, found from its
+size in points (A0-A4, either orientation). A ratio stated for another format applies rescaled by the format step
+(1:100 for A3 is 1:50 on an A1 sheet); format-tied ratios that disagree after rescaling are a CONFLICT, and bare
+ratios elsewhere on such a sheet (a fall written 1:100) are not the stamp.
+
+**Verified means measured.** A scale is `VERIFIED` only when an independent measurement on the sheet - a scale bar
+read with its numbers, or dimension chains - confirms the stated ratio within 1 %. A bar whose numbers cannot be
+read gives points, not metres, and neither chooses nor confirms a ratio: on the Årjäng plans a hatched EI30 wall was
+taken for such a bar and "confirmed" 1:100 on A1 sheets drawn in 1:50, doubling every metre. A scale that is only
+stated (`TEXT_ONLY`) or only measured one way (`BAR_ONLY`, `DIMENSIONS_ONLY`) is still used, but every metre measured
+under it carries the row state `SCALE_UNVERIFIED` instead of `CONFIRMED`.
+
+Local regression against real sheets (client material, never committed): list them in
+`data/local_facit/scale.json` (or `VVS_LOCAL_SCALE_FACIT`) and `tests/test_the_scale_is_the_one_for_the_sheet_format.py`
+reads each one and checks ratio and state.
+
 ## Review agents
 
 Every analysis is checked afterwards by agents that do not trust it (`vvs_engine/review/`). They report findings

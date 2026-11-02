@@ -176,70 +176,44 @@ def discover_scale(page: RawPage, lines: list[TextRow]) -> ScaleResult:
         ev.append(bar)
     texts = [e for e in ev if e.kind == "scale_text"]
     bars = [e for e in ev if e.kind == "scale_bar"]
+    stated = stated_for_this_sheet(page, texts)
     if bars and texts:
-        # choose the text evidence consistent with the bar (page qualifier may differ from actual plot format)
+        # the printed ratio is exact; a bar read with its own numbers measures it on the sheet. Only that, within
+        # VERIFY_TOL, makes the scale verified - a ratio the bar does not confirm is not the sheet's scale.
         for b in bars:
-            for t in texts:
-                if abs(t.value - b.value) / b.value <= 0.03:
-                    # the printed ratio is exact; the bar confirms it geometrically
-                    return ScaleResult(t.value, "page", "VERIFIED", [t, b], "scale_text_and_scale_bar_agree")
-        # a ratio printed for another sheet format, rescaled to this one, may be the one the bar agrees with
-        for b in bars:
-            for t in texts:
-                r = _ratio_for_other_format(page, t)
-                if r is not None and abs(r[0] - b.value) / b.value <= 0.03:
-                    return ScaleResult(r[0], "page", "VERIFIED", [t, b],
-                                       f"scale_text_for_{r[1]}_rescaled_to_{r[2]}_agrees_with_scale_bar")
+            for value, t, how in stated:
+                if abs(value - b.value) / b.value <= VERIFY_TOL:
+                    why = "scale_text_and_scale_bar_agree" if how == "stated" else f"{how}_agrees_with_scale_bar"
+                    return ScaleResult(value, "page", "VERIFIED", [t, b], why)
         return ScaleResult(bars[0].value, "page", "CONFLICT", ev, "scale_bar_disagrees_with_scale_text; bar (geometric) used")
     if bars:
         return ScaleResult(bars[0].value, "page", "BAR_ONLY", ev, "vector_scale_bar_only")
     dims = _dimension_scale(page, lines) if not bars else None
     if dims is not None:
         ev.append(dims)
-        for t in texts:
-            r = _ratio_for_other_format(page, t)
-            for v, why in ((t.value, "scale_text_and_dimensions_agree"),
-                           (r[0] if r else None, "scale_text_for_other_format_rescaled_and_dimensions_agree")):
-                if v and abs(v / dims.value - 1) <= DIM_TOL:
-                    return ScaleResult(v, "page", "VERIFIED", ev, why)
+        for value, _t, how in stated:
+            if abs(value / dims.value - 1) <= VERIFY_TOL:
+                why = "scale_text_and_dimensions_agree" if how == "stated" else f"{how}_and_dimensions_agree"
+                return ScaleResult(value, "page", "VERIFIED", ev, why)
         if texts:
             return ScaleResult(dims.value, "page", "CONFLICT", ev,
                                f"dimensions_disagree_with_scale_text; dimensions used ({dims.detail['agreeing']} agree)")
         return ScaleResult(dims.value, "page", "DIMENSIONS_ONLY", ev, "sheet_dimensions_only")
     if texts:
-        vals = sorted({round(t.value, 9) for t in texts})
-        # a scale bar whose numbers are too small to read is still drawn: its length in metres under a given
-        # ratio must come out whole, which is enough to confirm one printed ratio or to tell two apart
-        tick = find_tick_bar(page)
-        whole = [t for t in texts if tick and _whole_metres(tick[1] * t.value)] if tick else []
-        if tick and len({round(t.value, 9) for t in whole}) == 1:
-            t = whole[0]
-            note = ("scale_text_and_unlabelled_scale_bar_agree" if len(vals) == 1 else
-                    f"scale_text_selected_by_unlabelled_scale_bar ({round(tick[1] * t.value)} m over {tick[1]:.1f} pt)")
-            return ScaleResult(t.value, "page", "VERIFIED", ev, note)
-        # a row that states a ratio for another sheet format ("1:50 i A1-format") applies to this sheet scaled by
-        # the step between the two formats; the bar has to confirm the result before it is used
-        if tick:
-            for t in texts:
-                r = _ratio_for_other_format(page, t)
-                if r is not None and _whole_metres(tick[1] * r[0]):
-                    return ScaleResult(r[0], "page", "VERIFIED", ev,
-                                       f"scale_text_for_{r[1]}_rescaled_to_{r[2]}_and_confirmed_by_scale_bar "
-                                       f"({round(tick[1] * r[0])} m over {tick[1]:.1f} pt)")
-        if len(vals) == 1:
-            # a ratio stated for another sheet format ("SKALA 1:50 (A1)" on an A2 print) applies to this sheet
-            # scaled by the step between the two formats, as the bar-confirmed case above does
-            for t in texts:
-                r = _ratio_for_other_format(page, t)
-                if r is not None:
-                    return ScaleResult(r[0], "page", "TEXT_ONLY", ev,
-                                       f"scale_text_for_{r[1]}_rescaled_to_{r[2]} (no vector scale bar found)")
-            return ScaleResult(vals[0], "page", "TEXT_ONLY", ev, "scale_text_only (no vector scale bar found)")
-        # several ratios (e.g. '1:50 (1:100)'): prefer the one whose qualifier matches the page format
+        # Nothing on the sheet measured the scale: what the stamp states is used, but it is not verified, and every
+        # metre measured under it says so (measure.scale_standing). A drawn bar without readable numbers is not a
+        # measurement - it gives points, not metres - so it neither chooses nor confirms a ratio. (Årjäng W-50-1-1000:
+        # a hatched EI30 wall was taken for such a bar and "confirmed" 1:100 on an A1 sheet drawn in 1:50.)
+        values: list[float] = []
+        for v, _t, _h in sorted(stated, key=lambda c: c[0]):
+            if not values or abs(v / values[-1] - 1) > VERIFY_TOL:
+                values.append(v)
+        if len(values) == 1:
+            value, _t, how = stated[0]
+            why = ("scale_text_only (no vector scale bar found)" if how == "stated"
+                   else f"{how} (no independent measurement on the sheet)")
+            return ScaleResult(value, "page", "TEXT_ONLY", ev, why)
         fmt = _page_format(page)
-        for t in texts:
-            if fmt and f"({fmt})" in "".join(t.detail.get("qualifier", [])):
-                return ScaleResult(t.value, "page", "TEXT_ONLY", ev, f"scale_text_with_matching_page_format_{fmt}")
         # ratios listed in one row with the sheet formats listed in the same title-block cell, in the same order
         if fmt:
             rows: dict[tuple, list[ScaleEvidence]] = {}
@@ -255,6 +229,38 @@ def discover_scale(page: RawPage, lines: list[TextRow]) -> ScaleResult:
                                        f"scale_text_selected_by_sheet_format_{fmt} (formats {'/'.join(fmts)})")
         return ScaleResult(None, "none", "CONFLICT", ev, "several_scale_texts_no_geometric_confirmation")
     return ScaleResult(None, "none", "NONE", ev, "no_scale_evidence_found")
+
+
+VERIFY_TOL = 0.01           # an independent measurement must confirm the stated ratio within this share
+
+
+def _formats_of(t: ScaleEvidence) -> set[str]:
+    return {q.strip("()").upper() for q in t.detail.get("qualifier", [])}
+
+
+def stated_for_this_sheet(page: RawPage, texts: list[ScaleEvidence]) -> list[tuple[float, ScaleEvidence, str]]:
+    """The scale(s) the stamp states for this sheet, as (metres per point, evidence, how).
+
+    A stamp that ties its ratios to sheet formats ("1:50 (A1) 1:100 (A3)") says which one applies: the one for the
+    sheet's own format, found from the page size in points (A0-A4, either orientation). A ratio stated for another
+    format applies rescaled by the step between the formats - the same scale on paper of another size - and must
+    agree with the one stated for this format when both are legible. Bare ratios elsewhere on such a sheet (a fall
+    written 1:100 beside a pipe) are not the stamp and are not used. Without format-tied ratios every stated ratio
+    is a candidate, as before."""
+    fmt = _page_format(page)
+    tied = [t for t in texts if len(_formats_of(t)) == 1]
+    if not fmt or not tied:
+        return [(t.value, t, "stated") for t in texts]
+    out: list[tuple[float, ScaleEvidence, str]] = []
+    for t in tied:
+        (own,) = _formats_of(t)
+        if own == fmt:
+            out.append((t.value, t, f"scale_text_for_sheet_format_{fmt}"))
+            continue
+        r = _ratio_for_other_format(page, t)
+        if r is not None:
+            out.append((r[0], t, f"scale_text_for_{r[1]}_rescaled_to_{r[2]}"))
+    return out
 
 
 def _cell_formats(lines: list[TextRow], bbox: list[float]) -> list[str]:
