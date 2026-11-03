@@ -1338,10 +1338,22 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
                       f"ledarfamilj={f in leader_fams}  {f}", file=sys.stderr)
         # evaluate the vector structure of every voted family first (kind: fragmented-dashed / continuous / sparse)
         voted = sorted(f for f in votes if f not in leader_fams)
+        # A layer whose name carries the system code of one of the sheet's own pipe labels is the drawing saying
+        # which geometry is that system - as much a statement as a leader landing on it, and one that does not
+        # depend on a leader happening to be traced there. Without it a system's pipe layer was taken only when
+        # some leader voted for it, and on a sheet whose labels point at riser symbols and tick marks the layer
+        # came in, if at all, on the strength of a neighbour's pen: reading one more note beside a label moved a
+        # line to that note and fifteen metres of drainage went unmeasured. Such a layer still has to look like
+        # pipe (has_pipe_run) and be drawn heavier than the sheet writes with; the text layer of the same system
+        # carries the same code and is neither.
+        named_set = {fk for fk in set(fam_ink) | set(votes)
+                     if fk.split("|s|")[0] in named_pipe_layers and fk not in leader_fams}
+        named_fams = sorted(named_set - set(voted))
         figures: dict[str, list] = {}
-        prims_all = collect_prims(page, set(voted), exclude_pids=annotation_pids | glyph_pids, figures_out=figures)
+        prims_all = collect_prims(page, set(voted) | set(named_fams), exclude_pids=annotation_pids | glyph_pids,
+                                  figures_out=figures)
         desc: dict[str, tuple] = {}
-        for fk in voted:
+        for fk in voted + named_fams:
             if not prims_all.get(fk):
                 continue
             g = build_graph(prims_all[fk], fk, graph_tolerances(page), symbols=page_symbols(page))
@@ -1387,10 +1399,17 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
         best_ticks = max((tick_votes[f] for f in chain_voted), default=0)
         best_votes = max((votes[f] for f in chain_voted), default=0.0)
         best_leaders = max((leader_votes[f] for f in chain_voted), default=0)
-        for f in voted:
+        for f in voted + named_fams:
             if not chain_like(f):
                 continue
             layer, style = f.split("|s|")
+            if f in named_set and desc[f][0].width > annotation_width + 1e-6:
+                # named by the sheet's own pipe labels, looks like pipe, and heavier than the writing pen
+                pipe_families[f] = desc[f][0]
+                graphs[f] = desc[f][1]
+                continue
+            if f in named_fams:
+                continue        # no vote of its own, and not drawn as pipe is drawn: the name alone does not do
             # With no layer name to vouch for anything, the pens have to be told apart by how they are drawn. A
             # draughtsman does not draw a pipe fainter than the line that points at it: the leaders are the
             # sheet's own annotation weight, and ink below it is construction lines, hatching and grids.
@@ -2580,7 +2599,7 @@ def _is_vertical_label(d) -> bool:
     return d.dn_source == "row" and d.dn is not None and d.multiplier <= 1
 
 
-ELEV_TAG_RE = __import__("re").compile(r"^([A-ZÅÄÖ]{1,4})\s*([+\-]?)\s*(\d+[.,]?\d*)$")
+ELEV_TAG_RE = __import__("re").compile(r"^([A-ZÅÄÖ]{1,4})\s*(\+-|-\+|±|[+\-=]?)\s*(\d+[.,]?\d*)$")
 
 
 def _elevations(blocks, anchors) -> dict[str, list[dict]]:
@@ -2608,12 +2627,15 @@ def _elevations(blocks, anchors) -> dict[str, list[dict]]:
                     continue
                 if m.group(2) == "-":
                     v = -v
+                sign_open = m.group(2) in ("+-", "-+", "±")    # tecknet enligt konsulten: höjden är inte känd
                 # The unit is what the drawing wrote, not what the number looks like. A decimal separator is a
                 # level in metres ("VG+1,67"); a whole number of a thousand or more is millimetres ("CL 4000").
                 # A bare small integer says neither, and guessing there turns 100 and 150 into fifty metres of
                 # pipe. Such a value is carried with no unit and no vertical length is claimed from it.
                 digits = m.group(3)
                 unit = "m" if ("." in digits or "," in digits) else ("mm" if abs(v) >= 1000 else None)
+                if sign_open:
+                    unit = None         # ingen lodrät längd ur en höjd vars tecken inte är avgjort
                 ev.append({"tag": m.group(1), "value": v, "unit": unit,
                            "text": r.text_norm, "row_id": r.line.rid})
         if ev:

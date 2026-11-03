@@ -31,7 +31,7 @@ SAME_PLACE_SHARE = 0.5
 # gånger närmare, och de fall där de ligger lika nära är fall ritningen inte har avgjort.
 UNIT_MARGIN = 1.5
 from ..text.model import Glyph, TextRow, make_row, project, row_axes
-from .grammar import DesignationGrammar, NOMINAL_SIZES, compress_pattern, dn_plausible, is_code_like, split_tokens, strip_count_prefix, strip_row_separator, word_readings
+from .grammar import DesignationGrammar, NOMINAL_SIZES, compress_pattern, dn_plausible, is_code_like, is_height_note, split_tokens, strip_count_prefix, strip_row_separator, word_readings
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -793,7 +793,10 @@ def _row_role(text: str, br: BlockRow, b: AnnotationBlock) -> str:
             # "600X300" is two sizes, and the cross between them is not a qualifier.
             or _QUALIFIED_SIZE.fullmatch(mq.group(2))):
         return "dn"
-    # elevation: short letter tag + signed number (VG+1.67, CL 4000, FG +19.82)
+    # elevation: short letter tag + signed number (VG+1.67, CL 4000, FG +19.82), and the height notes CL/VG in
+    # every sign the drawings write (VG+-563, VG±828) - never a pipe designation
+    if is_height_note(t):
+        return "elevation"
     if ELEV_RE.match(t.replace(" ", "")) or (len(words) == 2 and re.fullmatch(r"[A-ZÅÄÖ]{1,4}", words[0]) and re.fullmatch(r"[+\-]?\d+[.,]?\d*", words[1])):
         return "elevation"
     if len(words) == 1 and is_code_like(words[0]) and _has_separator_or_prefix(words[0]):
