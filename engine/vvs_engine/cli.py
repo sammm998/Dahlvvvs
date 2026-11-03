@@ -157,9 +157,12 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
                 ocr_assist: bool = False, deadline_s: float | None = None, second_reader=None, known_families: dict | None = None,
                 known_legend: DrawingLegend | None = None, given_scale: dict[int, float] | float | None = None,
                 source_mode: str | None = None, source_ask=None, source_style="auto", source_detector=None,
-                external_labels=None) -> dict:
+                external_labels=None, layer_name_families: bool | None = None) -> dict:
     """external_labels: etiketter som en annan läsare redan läst (text/external_labels.py, `--labels`). Texten
     byts i motorns rader, geometrin behålls; filens sha256 står i frysmanifestets konfiguration.
+
+    layer_name_families: lagerregeln (pipeline.analyze_page). None = bara på blad där etikettfilen användes;
+    True/False = på/av för alla blad (`--layer-name-families on|off|auto`).
 
     deadline_s: a wall-clock budget for the whole document, checked between pages.
 
@@ -216,7 +219,7 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
                           second_reader=second_reader, known_families=known_families, known_legend=vocab,
                           given_scale=(given_scale if by_hand is None else by_hand.get(i)),
                           prepared=held.pop(i, None), source_mode=source_mode, source_ask=source_ask, source_style=source_style, source_detector=source_detector,
-                          external_labels=external_labels)
+                          external_labels=external_labels, layer_name_families=layer_name_families)
         # what this sheet showed about its codes goes back into the set's list, so the sheets after it start
         # from what has been read rather than from a column of words with no verdict on any row
         learn_roles(vocab, pa.legend)
@@ -251,7 +254,7 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
                               film_sink=film_sink if i == 0 else None, second_reader=second_reader,
                               known_families=known_families, known_legend=vocab, known_scale=set_scale,
                               known_scale_pages=[p for p in set_scale_pages if p != i], source_mode=source_mode, source_ask=source_ask, source_style=source_style, source_detector=source_detector,
-                              external_labels=external_labels)
+                              external_labels=external_labels, layer_name_families=layer_name_families)
             learn_roles(vocab, pa.legend)
             overlay.replace(pa)
             sheets[i] = sheet_record(pa)
@@ -280,12 +283,13 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
     # the same kind of answer as one that did not, and the determinism check is meaningless over it.
     consulted = any((sh.get("second_reader") or {}).get("asked") for sh in sheets)
     det = run_determinism(doc, 0, first, known_families=known_families, known_legend=vocab,
-                          external_labels=external_labels) \
+                          external_labels=external_labels, layer_name_families=layer_name_families) \
         if determinism and not consulted and source_mode is None else None
     cont = scan_source(os.path.dirname(os.path.abspath(__file__))) if contamination else None
     t0 = time.perf_counter()
     timings["total_s"] = time.perf_counter() - t_all
     config = dict(CONFIG)
+    config["layer_name_families"] = {None: "auto", True: "on", False: "off"}[layer_name_families]
     if external_labels is not None:
         config["external_labels"] = {"sha256": external_labels.sha256, "reader": external_labels.meta,
                                      "pages": sorted(external_labels.by_page)}
@@ -328,6 +332,8 @@ def main(argv=None):
     a.add_argument("pdf"); a.add_argument("--out", required=True); a.add_argument("--name")
     a.add_argument("--no-determinism", action="store_true"); a.add_argument("--no-contamination", action="store_true")
     a.add_argument("--labels", help="etiketter lästa av en annan läsare (JSON, se vvs_engine/text/external_labels.py)")
+    a.add_argument("--layer-name-families", choices=("auto", "on", "off"), default="auto",
+                   help="lagerregeln: auto = bara på blad med etikettfil (standard)")
     w = sub.add_parser("why", help="evidence chain for a physical pipe id (re-analyzes the PDF)")
     w.add_argument("pdf"); w.add_argument("pipe_id")
     sub.add_parser("version")
@@ -340,7 +346,8 @@ def main(argv=None):
             from .text.external_labels import ExternalLabels
             labels = ExternalLabels.load(args.labels)
         s = analyze_pdf(args.pdf, args.out, args.name, not args.no_determinism, not args.no_contamination, progress=lambda st: print(f"[{st}]", file=sys.stderr),
-                        external_labels=labels)
+                        external_labels=labels,
+                        layer_name_families={"auto": None, "on": True, "off": False}[args.layer_name_families])
         print(json.dumps(s["summary"], indent=1, default=str)); return 0
     if args.cmd == "why":
         doc = extract_document(args.pdf)

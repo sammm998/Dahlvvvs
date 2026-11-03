@@ -533,6 +533,8 @@ def sheet_reading(pa, doc, doc_legend=None, profile: dict | None = None,
     # profile report is about, and the per-sheet copies carry the labels alone.
     if getattr(pa, "external_labels", None):
         out["external-labels.json"] = pa.external_labels
+    if getattr(pa, "layer_name_rule", None):
+        out["layer-name-rule.json"] = pa.layer_name_rule
     out["vector-designations.json"] = {"designations": des_out,
                                        **({"text_rows": [r.as_dict() for r in pa.lines]} if forensics else {})}
     # The set's list, but told from this sheet: whether the sheet in front of the reader is the one that wrote

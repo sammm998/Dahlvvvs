@@ -101,3 +101,26 @@ def test_local_sheet_measures_the_pipes_its_labels_name(sheet):
     for tag in sheet["never_designations"]:
         assert not any(is_height_note(d.text) for d in pa.designations if d.text.upper().startswith(tag)), \
             (sheet["name"], [d.text for d in pa.designations if d.text.upper().startswith(tag)])
+
+
+@pytest.mark.skipif(_local() is None, reason="lokalt facit för etikettfilen saknas (data/local_facit/t5_labels.json)")
+def test_the_layer_rule_is_on_only_with_external_labels():
+    """Utan etikettfil är lagerregeln av (som på main); med etikettfil är den på och loggar vad den tog in;
+    `layer_name_families=False` stänger av den även med etikettfil."""
+    from vvs_engine.pdf.extract import extract_document
+    from vvs_engine.pipeline import analyze_page
+    from vvs_engine.text.external_labels import ExternalLabels
+    facit = _local()
+    labels = ExternalLabels.load(facit["labels"])
+    plan0 = next(s for s in facit["sheets"] if "_S02-" in s["pipe_family_tokens"])
+    page = extract_document(facit["pdf"]).pages[plan0["page"]]
+    def families(pa):
+        return {m.pipe.family for m in pa.measures}
+
+    assert analyze_page(page).layer_name_rule is None
+    on = analyze_page(page, external_labels=labels)
+    # regeln loggar vad den tog in direkt; S02 följer sedan med via mallen för samma penna
+    assert on.layer_name_rule["enabled"] and on.layer_name_rule["families_added"]
+    assert any("_S02-" in f for f in families(on))
+    off = analyze_page(page, external_labels=labels, layer_name_families=False)
+    assert off.layer_name_rule is None and not any("_S02-" in f for f in families(off))

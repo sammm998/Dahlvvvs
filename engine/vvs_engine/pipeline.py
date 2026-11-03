@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -12,6 +13,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable
+
+_log = logging.getLogger(__name__)
 
 from .geometry.core import stable_id
 from .pdf.extract import RawDocument, RawPage, extract_document
@@ -136,6 +139,7 @@ class PageAnalysis:
     register: dict | None = None            # varje beteckning bladet skriver, i läget "Alla" (register.py)
     wide_runs: list[dict] = field(default_factory=list)   # andra discipliners ledningar, i läget "Alla" (widened_runs)
     external_labels: dict | None = None     # vad en extern etikettfil (text/external_labels.py) gjorde med bladet
+    layer_name_rule: dict | None = None     # lagerregeln: på/av, och familjerna som bara den tog in som rör
 
 
 # A label over a bundle has found its pipes - the leader landed on as many drawn parallel lines as the block has
@@ -1112,7 +1116,7 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
                  given_scale: float | None = None,
                  prepared: "PreparedPage | None" = None,
                  source_mode: str | None = None, source_ask=None, source_style="auto", source_detector=None,
-                 external_labels: Any = None) -> PageAnalysis:
+                 external_labels: Any = None, layer_name_families: bool | None = None) -> PageAnalysis:
     """second_reader: an optional transport for putting the reading's own open cases to a language model.
 
     Without it - the default, and what every test and every reference run uses - nothing is asked, the analysis
@@ -1124,6 +1128,11 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     # The front half of the reading says what it is finding as it finds it, so a prepared sheet must not say it
     # all a second time: it was said when it was worked out.
     prep = prepared if prepared is not None else prepare_page(page, progress, ocr_assist, film, external_labels)
+    # Lagerregeln (ett lager som bär systemkoden för en av bladets egna rörbeteckningar är en rörfamilj) gäller
+    # som standard bara på blad där en extern etikettfil har använts: utan den kan motorn ofta inte läsa
+    # systemens etiketter, och regeln gör då bara mer rör synligt utan namn. None = så; True/False = alltid/aldrig.
+    use_layer_names = (prep.label_report is not None) if layer_name_families is None else bool(layer_name_families)
+    by_layer_name: set[str] = set()     # familjer som bara regeln tog in - loggas
     timings = dict(prep.timings)
     layer_stats, vtext, srows = prep.layer_stats, prep.vtext, prep.srows
     lines, blocks, free, designations, grammar = prep.lines, prep.blocks, prep.free, prep.designations, prep.grammar
@@ -1347,7 +1356,7 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
         # pipe (has_pipe_run) and be drawn heavier than the sheet writes with; the text layer of the same system
         # carries the same code and is neither.
         named_set = {fk for fk in set(fam_ink) | set(votes)
-                     if fk.split("|s|")[0] in named_pipe_layers and fk not in leader_fams}
+                     if use_layer_names and fk.split("|s|")[0] in named_pipe_layers and fk not in leader_fams}
         named_fams = sorted(named_set - set(voted))
         figures: dict[str, list] = {}
         prims_all = collect_prims(page, set(voted) | set(named_fams), exclude_pids=annotation_pids | glyph_pids,
@@ -1403,13 +1412,14 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
             if not chain_like(f):
                 continue
             layer, style = f.split("|s|")
-            if f in named_set and desc[f][0].width > annotation_width + 1e-6:
-                # named by the sheet's own pipe labels, looks like pipe, and heavier than the writing pen
-                pipe_families[f] = desc[f][0]
-                graphs[f] = desc[f][1]
-                continue
+            by_name = f in named_set and desc[f][0].width > annotation_width + 1e-6
             if f in named_fams:
-                continue        # no vote of its own, and not drawn as pipe is drawn: the name alone does not do
+                # no vote of its own: only the layer rule can take it, and only if it is drawn as pipe is drawn
+                if by_name:
+                    pipe_families[f] = desc[f][0]
+                    graphs[f] = desc[f][1]
+                    by_layer_name.add(f)
+                continue
             # With no layer name to vouch for anything, the pens have to be told apart by how they are drawn. A
             # draughtsman does not draw a pipe fainter than the line that points at it: the leaders are the
             # sheet's own annotation weight, and ink below it is construction lines, hatching and grids.
@@ -1446,6 +1456,10 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
             # between them and every one of them falls short. So a family is measured against the best family
             # rather than against the sum: several pens carrying comparable numbers of label ends are several
             # systems, while the sheet's background carries almost none however the rest is divided.
+            if not accept and by_name:
+                # named by the sheet's own pipe labels, looks like pipe, and heavier than the writing pen
+                accept = True
+                by_layer_name.add(f)
             if accept:
                 pipe_families[f] = desc[f][0]
                 graphs[f] = desc[f][1]
@@ -2044,7 +2058,20 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     film.measured(quantities, scale)
     t0 = _t(timings, "measurement_ms", t0)
     timings.update({f"text_{k}": v for k, v in vt_timing.items()})
-    pa = PageAnalysis(page=page, external_labels=(prep.label_report.as_dict() if prep.label_report else None),
+    layer_rule = None
+    if use_layer_names:
+        added = sorted(by_layer_name & set(pipe_families))
+        layer_rule = {"enabled": True, "why": "extern etikettfil" if layer_name_families is None else "begärd",
+                      "families_added": added}
+        if added:
+            _log.info("Lagerregeln tog in %d rörfamilj(er) på blad %d: %s", len(added), page.info.index,
+                      ", ".join(added))
+            if film:
+                film.note("RESOLVING_PIPE_REPRESENTATION",
+                          "Lagerregeln: " + ", ".join(f.split("|s|")[0] for f in added)
+                          + " bär systemkoden för bladets egna rörbeteckningar och räknas som rör.")
+    pa = PageAnalysis(page=page, layer_name_rule=layer_rule,
+                      external_labels=(prep.label_report.as_dict() if prep.label_report else None),
                       legend=legend, declarations=declarations, second_reader=second, source_assignment=source_assignment, layer_stats=layer_stats, vtext=vtext, srows=srows, lines=lines, blocks=blocks,
                       designations=designations, grammar=grammar, ann_layers=ann_layers, leaders=leaders,
                       pipe_families=pipe_families, prims=prims, graphs=graphs, anchors=anchors, contact_stats=contact_stats,
