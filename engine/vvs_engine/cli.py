@@ -36,7 +36,7 @@ class AnalysisTookTooLong(Exception):
 VOCAB_HOLD = 2          # readings kept from the search for the list; past that, looking again is cheaper than keeping
 
 
-def _upright(pdf_path: str, doc, pages, out_dir: str, progress):
+def _upright(pdf_path: str, doc, pages, out_dir: str, progress, external_labels=None):
     """The file to read: the one given, or a copy with the pages that lie on their side turned to read.
 
     Every sheet's lettering is read as it lies; one that names few pipes with a size is tried a quarter turn each
@@ -47,7 +47,7 @@ def _upright(pdf_path: str, doc, pages, out_dir: str, progress):
     held: dict[int, Any] = {}
     for i in range(len(doc.pages)):
         pg = doc.pages[i]
-        prep = prepare_page(pg)
+        prep = prepare_page(pg, external_labels=external_labels)
         # a page read from pixels has already read its text both ways round; turning it means reading it again
         from_image = (pg.input_class or {}).get("read_as") == "raster"
         t = 0 if from_image else turn_for(pdf_path, pg.info.index, prep)
@@ -66,7 +66,7 @@ def _upright(pdf_path: str, doc, pages, out_dir: str, progress):
 
 
 def _vocabulary(doc, known_legend: DrawingLegend | None, progress, ocr_assist: bool, film_sink=None,
-                held: dict | None = None):
+                held: dict | None = None, external_labels=None):
     """The set's designation list, and the sheet readings the search for it already paid for.
 
     Sheets are looked at in order and the search stops at the first that carries a list, which on almost every
@@ -82,7 +82,7 @@ def _vocabulary(doc, known_legend: DrawingLegend | None, progress, ocr_assist: b
         prep = held.get(i) if not ocr_assist else None
         if prep is None:
             prep = prepare_page(doc.pages[i], progress if i == 0 else None, ocr_assist,
-                                Film(film_sink) if i == 0 else None)
+                                Film(film_sink) if i == 0 else None, external_labels)
         if len(held) < _R("cli.VOCAB_HOLD", VOCAB_HOLD):
             held[i] = prep
         elif i > 0:
@@ -156,8 +156,12 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
                 film_sink=None,
                 ocr_assist: bool = False, deadline_s: float | None = None, second_reader=None, known_families: dict | None = None,
                 known_legend: DrawingLegend | None = None, given_scale: dict[int, float] | float | None = None,
-                source_mode: str | None = None, source_ask=None, source_style="auto", source_detector=None) -> dict:
-    """deadline_s: a wall-clock budget for the whole document, checked between pages.
+                source_mode: str | None = None, source_ask=None, source_style="auto", source_detector=None,
+                external_labels=None) -> dict:
+    """external_labels: etiketter som en annan läsare redan läst (text/external_labels.py, `--labels`). Texten
+    byts i motorns rader, geometrin behålls; filens sha256 står i frysmanifestets konfiguration.
+
+    deadline_s: a wall-clock budget for the whole document, checked between pages.
 
     A drawing set can carry a page dense enough that reading it takes longer than anyone will wait, and without a
     budget that page does not just delay itself - it holds the worker thread and everything queued behind it. The
@@ -191,8 +195,12 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
     # would have to go back and read the early ones again once the list turned up. Looking for the list first
     # costs nothing where it is on the front sheet, because that sheet's reading is kept and used.
     # A sheet lying on its side is turned to read first: everything after reads, and shows, the upright sheet.
-    pdf_path, doc, checked, turns = _upright(pdf_path, doc, pages, out_dir, progress)
-    vocab, held = _vocabulary(doc, known_legend, progress, ocr_assist, film_sink, held=checked)
+    pdf_path, doc, checked, turns = _upright(pdf_path, doc, pages, out_dir, progress, external_labels)
+    if turns and external_labels is not None:
+        # etiketterna lästes på bladet som det låg; ett vridet blad har andra koordinater och får dem inte
+        external_labels = external_labels.without(turns)
+    vocab, held = _vocabulary(doc, known_legend, progress, ocr_assist, film_sink, held=checked,
+                              external_labels=external_labels)
     if progress:
         progress("READING_PDF")
     overlay = OverlayWriter(pdf_path, out_dir)
@@ -207,7 +215,8 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
                           film_sink=film_sink if pg.info.index == 0 else None,
                           second_reader=second_reader, known_families=known_families, known_legend=vocab,
                           given_scale=(given_scale if by_hand is None else by_hand.get(i)),
-                          prepared=held.pop(i, None), source_mode=source_mode, source_ask=source_ask, source_style=source_style, source_detector=source_detector)
+                          prepared=held.pop(i, None), source_mode=source_mode, source_ask=source_ask, source_style=source_style, source_detector=source_detector,
+                          external_labels=external_labels)
         # what this sheet showed about its codes goes back into the set's list, so the sheets after it start
         # from what has been read rather than from a column of words with no verdict on any row
         learn_roles(vocab, pa.legend)
@@ -241,7 +250,8 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
             pa = analyze_page(doc.pages[i], progress, ocr_assist=ocr_assist,
                               film_sink=film_sink if i == 0 else None, second_reader=second_reader,
                               known_families=known_families, known_legend=vocab, known_scale=set_scale,
-                              known_scale_pages=[p for p in set_scale_pages if p != i], source_mode=source_mode, source_ask=source_ask, source_style=source_style, source_detector=source_detector)
+                              known_scale_pages=[p for p in set_scale_pages if p != i], source_mode=source_mode, source_ask=source_ask, source_style=source_style, source_detector=source_detector,
+                              external_labels=external_labels)
             learn_roles(vocab, pa.legend)
             overlay.replace(pa)
             sheets[i] = sheet_record(pa)
@@ -269,12 +279,17 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
     # drawing itself offers - but it is still a machine outside this one, so a reading that consulted it is not
     # the same kind of answer as one that did not, and the determinism check is meaningless over it.
     consulted = any((sh.get("second_reader") or {}).get("asked") for sh in sheets)
-    det = run_determinism(doc, 0, first, known_families=known_families, known_legend=vocab) \
+    det = run_determinism(doc, 0, first, known_families=known_families, known_legend=vocab,
+                          external_labels=external_labels) \
         if determinism and not consulted and source_mode is None else None
     cont = scan_source(os.path.dirname(os.path.abspath(__file__))) if contamination else None
     t0 = time.perf_counter()
     timings["total_s"] = time.perf_counter() - t_all
-    files = write_all(pdf_path, doc, [first], out_dir, name, timings, det, cont, overlays, CONFIG, rev,
+    config = dict(CONFIG)
+    if external_labels is not None:
+        config["external_labels"] = {"sha256": external_labels.sha256, "reader": external_labels.meta,
+                                     "pages": sorted(external_labels.by_page)}
+    files = write_all(pdf_path, doc, [first], out_dir, name, timings, det, cont, overlays, config, rev,
                       sheets=sheets, doc_legend=vocab)
     timings["artifacts_ms"] = (time.perf_counter() - t0) * 1000
     summary = {"name": name, "pages": n_pages, "summary": summarize(first),
@@ -312,6 +327,7 @@ def main(argv=None):
     a = sub.add_parser("analyze", help="analyze a clean vector VVS PDF")
     a.add_argument("pdf"); a.add_argument("--out", required=True); a.add_argument("--name")
     a.add_argument("--no-determinism", action="store_true"); a.add_argument("--no-contamination", action="store_true")
+    a.add_argument("--labels", help="etiketter lästa av en annan läsare (JSON, se vvs_engine/text/external_labels.py)")
     w = sub.add_parser("why", help="evidence chain for a physical pipe id (re-analyzes the PDF)")
     w.add_argument("pdf"); w.add_argument("pipe_id")
     sub.add_parser("version")
@@ -319,7 +335,12 @@ def main(argv=None):
     if args.cmd == "version":
         print(__version__); return 0
     if args.cmd == "analyze":
-        s = analyze_pdf(args.pdf, args.out, args.name, not args.no_determinism, not args.no_contamination, progress=lambda st: print(f"[{st}]", file=sys.stderr))
+        labels = None
+        if args.labels:
+            from .text.external_labels import ExternalLabels
+            labels = ExternalLabels.load(args.labels)
+        s = analyze_pdf(args.pdf, args.out, args.name, not args.no_determinism, not args.no_contamination, progress=lambda st: print(f"[{st}]", file=sys.stderr),
+                        external_labels=labels)
         print(json.dumps(s["summary"], indent=1, default=str)); return 0
     if args.cmd == "why":
         doc = extract_document(args.pdf)

@@ -531,6 +531,8 @@ def sheet_reading(pa, doc, doc_legend=None, profile: dict | None = None,
     # it, and on a set it is by far the largest thing written - twenty-six copies of it is ninety per cent of a
     # reading's disk for something no page of the application opens. It is written once, with the sheet the
     # profile report is about, and the per-sheet copies carry the labels alone.
+    if getattr(pa, "external_labels", None):
+        out["external-labels.json"] = pa.external_labels
     out["vector-designations.json"] = {"designations": des_out,
                                        **({"text_rows": [r.as_dict() for r in pa.lines]} if forensics else {})}
     # The set's list, but told from this sheet: whether the sheet in front of the reader is the one that wrote

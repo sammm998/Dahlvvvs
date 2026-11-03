@@ -135,6 +135,7 @@ class PageAnalysis:
     frontiers: list[dict] = field(default_factory=list)   # var varje rör slutar och varför (pipes/frontier.py)
     register: dict | None = None            # varje beteckning bladet skriver, i läget "Alla" (register.py)
     wide_runs: list[dict] = field(default_factory=list)   # andra discipliners ledningar, i läget "Alla" (widened_runs)
+    external_labels: dict | None = None     # vad en extern etikettfil (text/external_labels.py) gjorde med bladet
 
 
 # A label over a bundle has found its pipes - the leader landed on as many drawn parallel lines as the block has
@@ -143,6 +144,25 @@ class PageAnalysis:
 # only after the reading has been chosen. Counting it as a miss let a reading that had found nothing but the
 # heating pipes beat one that had found the water and waste runs it was being asked about.
 FOUND_ITS_PIPES = ("multi_row_bundle_awaiting_elimination",)
+
+
+EXTERNAL_LABEL_UNCERTAIN = "EXTERNAL_LABEL_UNCERTAIN"
+
+
+def _names_from_uncertain_labels(report, designations, blocks, anchors) -> set[str]:
+    """Ankarna vars beteckning (eller dess dimensionsrad) står på en rad ur etikettfilen som läsaren flaggade."""
+    if report is None or not report.uncertain_rids:
+        return set()
+    by_id = {b.bid: b for b in blocks}
+    shaky: set[str] = set()
+    for d in designations:
+        b = by_id.get(d.block_id)
+        if b is None:
+            continue
+        rows = [d.row_index] + ([d.dn_row_index] if d.dn_row_index is not None else [])
+        if any(0 <= ri < len(b.rows) and b.rows[ri].line.rid in report.uncertain_rids for ri in rows):
+            shaky.add(d.did)
+    return {a.anchor_id for a in anchors if a.designation_id in shaky}
 
 
 def reached_labels(anchors, pipe_labels: set[str]) -> set[str]:
@@ -960,10 +980,11 @@ class PreparedPage:
     timings: dict
     vt_timing: dict
     declarations: Declarations = field(default_factory=Declarations)
+    label_report: Any = None        # text/external_labels.LabelReport när en etikettfil användes
 
 
 def prepare_page(page: RawPage, progress: Callable[[str], None] | None = None, ocr_assist: bool = False,
-                 film: "Film | None" = None) -> PreparedPage:
+                 film: "Film | None" = None, external_labels: Any = None) -> PreparedPage:
     """Read the sheet as far as its own words go, and no further."""
     timings: dict[str, float] = {}
     film = film or Film(None)
@@ -1023,6 +1044,14 @@ def prepare_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     # ställe, den bättre av de två.
     twice: dict = {}
     lines = one_reading_per_place(lines, twice)
+    label_report = None
+    if external_labels is not None:
+        # Etiketter som en annan läsare redan läst tecken för tecken: texten byts, motorns geometri behålls.
+        lines, label_report = external_labels.apply(lines, page.info.index)
+        if film:
+            film.note("READING_DESIGNATIONS",
+                      f"Etikettfilen: {label_report.labels} etiketter, {label_report.changed} rader fick ny text, "
+                      f"{label_report.added} nya, {label_report.uncertain} osäkra (granskas).")
     consumed = set(pid for r in vtext.rows for pid in r.provenance) | set(pid for m in vtext.marks for pid in m.path_ids)
     free = free_segments(page, consumed)
     blocks = build_blocks(page, lines, free)
@@ -1053,7 +1082,8 @@ def prepare_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     _t(timings, "designation_ms", t0)
     return PreparedPage(page=page, layer_stats=layer_stats, vtext=vtext, srows=srows, lines=lines, blocks=blocks,
                         free=free, consumed=consumed, designations=designations, grammar=grammar, legend=legend,
-                        ocr_report=ocr_report, timings=timings, vt_timing=vt_timing, declarations=declarations)
+                        ocr_report=ocr_report, timings=timings, vt_timing=vt_timing, declarations=declarations,
+                        label_report=label_report)
 
 
 def rows_needing_a_pipe(rows: list, pipe_labels: set[str]) -> list:
@@ -1081,7 +1111,8 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
                  known_scale_pages: list[int] | None = None,
                  given_scale: float | None = None,
                  prepared: "PreparedPage | None" = None,
-                 source_mode: str | None = None, source_ask=None, source_style="auto", source_detector=None) -> PageAnalysis:
+                 source_mode: str | None = None, source_ask=None, source_style="auto", source_detector=None,
+                 external_labels: Any = None) -> PageAnalysis:
     """second_reader: an optional transport for putting the reading's own open cases to a language model.
 
     Without it - the default, and what every test and every reference run uses - nothing is asked, the analysis
@@ -1092,7 +1123,7 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     film = Film(film_sink)
     # The front half of the reading says what it is finding as it finds it, so a prepared sheet must not say it
     # all a second time: it was said when it was worked out.
-    prep = prepared if prepared is not None else prepare_page(page, progress, ocr_assist, film)
+    prep = prepared if prepared is not None else prepare_page(page, progress, ocr_assist, film, external_labels)
     timings = dict(prep.timings)
     layer_stats, vtext, srows = prep.layer_stats, prep.vtext, prep.srows
     lines, blocks, free, designations, grammar = prep.lines, prep.blocks, prep.free, prep.designations, prep.grammar
@@ -1955,6 +1986,13 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
             pp.needs_review = True
             if RASTER_FLAG not in pp.flags:
                 pp.flags.append(RASTER_FLAG)
+    uncertain_names = _names_from_uncertain_labels(prep.label_report, designations, blocks, anchors)
+    if uncertain_names:
+        for pp in ownership.pipes:
+            if set(pp.anchor_ids) & uncertain_names:
+                pp.needs_review = True      # namnet kommer från en etikett läsaren själv inte var säker på
+                if EXTERNAL_LABEL_UNCERTAIN not in pp.flags:
+                    pp.flags.append(EXTERNAL_LABEL_UNCERTAIN)
     measures = measure_pipes(ownership, scale, elevations, hatched_pt, from_image=from_image)
     risers = _riser_symbols(page, ann_layers, glyph_pids, graphs, ownership, anchors, identities)
     label_risers = _risers_from_dn_rows(designations, anchors, leaders, identities)
@@ -1987,7 +2025,8 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     film.measured(quantities, scale)
     t0 = _t(timings, "measurement_ms", t0)
     timings.update({f"text_{k}": v for k, v in vt_timing.items()})
-    pa = PageAnalysis(page=page, legend=legend, declarations=declarations, second_reader=second, source_assignment=source_assignment, layer_stats=layer_stats, vtext=vtext, srows=srows, lines=lines, blocks=blocks,
+    pa = PageAnalysis(page=page, external_labels=(prep.label_report.as_dict() if prep.label_report else None),
+                      legend=legend, declarations=declarations, second_reader=second, source_assignment=source_assignment, layer_stats=layer_stats, vtext=vtext, srows=srows, lines=lines, blocks=blocks,
                       designations=designations, grammar=grammar, ann_layers=ann_layers, leaders=leaders,
                       pipe_families=pipe_families, prims=prims, graphs=graphs, anchors=anchors, contact_stats=contact_stats,
                       ownership=ownership, scale=scale, measures=measures, quantities=quantities, elevations=elevations,
