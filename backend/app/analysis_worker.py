@@ -61,6 +61,11 @@ def _child(connection, args, kwargs, rule_values):
             kwargs['source_ask'] = ai_models.transport(ai_model)
             if ai_model != ai_models.NONE and kwargs['source_ask'] is None:
                 raise RuntimeError(f'{ai_models.LABELS.get(ai_model, ai_model)} är inte ansluten på servern.')
+        labels_path = kwargs.pop('external_labels_path', None)
+        if labels_path:
+            # etiketter som en annan läsare (VS-Kalkyls T5) redan läst; se vvs_engine/text/external_labels.py
+            from vvs_engine.text.external_labels import ExternalLabels
+            kwargs['external_labels'] = ExternalLabels.load(labels_path)
         persistent_dir = kwargs.pop('native_cache_dir', None)
         if kwargs.pop('native_detection', False):
             from vvs_engine.source_rules.native_detection import detect_page

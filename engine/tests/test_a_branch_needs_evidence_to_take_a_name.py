@@ -87,16 +87,25 @@ def _run_with_branch(branch_end_draw=None):
     return draw
 
 
-def test_a_branch_that_ends_in_empty_air_is_a_question_not_an_answer(tmp_path):
+def test_a_branch_that_ends_in_empty_air_inherits_with_an_uncertain_size(tmp_path):
+    """VS-Kalkyl SPEC 6.4.3 h.3 (beslut 2026-11-03): en gren utan egen etikett ärver system och material, med
+    osäker dimension. Den mäts som ett eget rör i granskningsnivån - aldrig som säker - och huvudstråket står.
+    Med regeln av är grenen en fråga, som förut."""
+    from vvs_engine.rules import using
     pa = _sheet(str(tmp_path / "luft.pdf"), _run_with_branch())
     st = _states(pa)
-    assert st[(300, 210)] == ("AMBIGUOUS", "UNLABELLED_BRANCH_WITHOUT_END_EVIDENCE"), st
+    assert st[(300, 210)][0] == "CONFIRMED", st
     assert st[(200, 300)][0] == "CONFIRMED" and st[(400, 300)][0] == "CONFIRMED", "huvudstråket är helt"
     pipes = [p for p in pa.ownership.pipes if p.identity.display == "KV11-16"]
-    assert len(pipes) == 1 and abs(pipes[0].raw_length_pt - 400) < 1.0, "stråkets kontinuitet bevaras genom T:t"
+    main = [p for p in pipes if not p.needs_review]
+    assert len(main) == 1 and abs(main[0].raw_length_pt - 400) < 1.0, "stråkets kontinuitet bevaras genom T:t"
+    assert [p for p in pipes if p.needs_review], "grenen är ett eget rör, att granska"
     q = {r["designation"]: r for r in pa.quantities}
-    assert abs(q["KV11-16"]["ambiguous_m"] - 180 / 56.69) < 0.1, "grenens meter redovisas, som fråga"
-    assert any(r["reason"] == "UNLABELLED_BRANCH_WITHOUT_END_EVIDENCE" for r in pa.ownership.ambiguous_runs)
+    assert abs(q["KV11-16"]["review_m"] - 180 / 56.69) < 0.1, "grenens meter redovisas, att granska"
+    assert q["KV11-16"]["ambiguous_m"] == 0
+    with using({"pipes.ownership.PROPAGATE_TO_STOPS": False}):
+        pa = _sheet(str(tmp_path / "luft2.pdf"), _run_with_branch())
+    assert _states(pa)[(300, 210)] == ("AMBIGUOUS", "UNLABELLED_BRANCH_WITHOUT_END_EVIDENCE")
 
 
 def test_a_branch_that_ends_in_a_component_takes_the_name(tmp_path):
@@ -153,7 +162,9 @@ def test_a_branch_into_an_unnamed_grid_stays_a_question(tmp_path):
 def test_the_flow_budget_is_the_runs_own_not_the_pens(tmp_path):
     """Två stråk på samma penna. A rinner 150 pt förbi sin etikett, B 400 pt. Med en budget summerad över
     pennan (550 mot 200 etiketterat, 2,75 gånger) förlorade båda sina flödade meter; med stråkets egen budget
-    förlorar bara B."""
+    förlorar bara B. Gäller med spridningsregeln av; med den på (SPEC 6.4.3 h.3) har ett träd av rör ingen
+    längdbudget, och båda stråken står - se nedan."""
+    from vvs_engine.rules import using
     def draw(page):
         # A: etiketterad del 100..200, T-stump vid 200, rakt fortsättning 200..350 (150 pt, 1,5 gånger)
         page.draw_line((100, 200), (200, 200), width=PEN, color=(0, 0, 0))
@@ -165,7 +176,8 @@ def test_the_flow_budget_is_the_runs_own_not_the_pens(tmp_path):
         page.draw_line((200, 400), (600, 400), width=PEN, color=(0, 0, 0))
         page.draw_line((200, 400), (200, 370), width=PEN, color=(0, 0, 0))
         _label(page, 60.0, 320.0, "VV11-16", (150.0, 400.0))
-    pa = _sheet(str(tmp_path / "budget.pdf"), draw)
+    with using({"pipes.ownership.PROPAGATE_TO_STOPS": False}):
+        pa = _sheet(str(tmp_path / "budget.pdf"), draw)
     st = _states(pa)
     assert st[(275, 200)] == ("CONFIRMED", "collinear_through_junction"), st[(275, 200)]
     assert st[(400, 400)] == ("AMBIGUOUS", "AMBIGUOUS_FLOW_BEYOND_THE_LABELLED_RUNS"), st[(400, 400)]
@@ -173,3 +185,7 @@ def test_the_flow_budget_is_the_runs_own_not_the_pens(tmp_path):
     assert len(runs) == 1 and runs[0]["identities"] == ["VV11|DN16"] and runs[0]["labelled_pt"] < runs[0]["flowed_pt"]
     fr = reading_coverage(pa)["frontiers"]["by_reason"]
     assert fr.get(F.FLOW_BUDGET, 0) >= 1
+    # spridning till stopp: en rak fortsättning i ett träd har ingen längdbudget
+    pa = _sheet(str(tmp_path / "budget2.pdf"), draw)
+    assert _states(pa)[(400, 400)] == ("CONFIRMED", "collinear_through_junction")
+    assert not [r for r in pa.ownership.ambiguous_runs if r["reason"] == "AMBIGUOUS_FLOW_BEYOND_THE_LABELLED_RUNS"]

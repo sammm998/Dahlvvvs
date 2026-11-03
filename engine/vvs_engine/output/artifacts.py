@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import json
 import os
 import platform
@@ -17,6 +18,49 @@ from ..pipeline import reading_coverage
 from ..measure.measure import SETTLED_SCALE
 from ..semantics.leaders import leader_family_report
 from ..pipes.confidence import tier
+from ..rules import value as _rule
+
+LEADERS_MEET_MIN = 3        # så många etiketter vars ledare slutar i en punkt utan rör rapporteras med punkten
+LEADERS_MEET_RADIUS = 2.5   # pt: ...inom så här nära varandra är det en punkt (samma som NEAR_ONE)
+
+
+def leaders_meeting_without_pipe(anchors) -> list[dict]:
+    """Punkter där flera etiketters ledare slutar utan att något rör finns där (VS-Kalkyl SPEC 6.4.3 h.1).
+
+    En ensam etikett som missar sitt rör är ett läsfel; flera som pekar på samma punkt - genom en gemensam ledare
+    från ett staplat block eller genom ledare som möts - pekar på något ritningen visar men läsningen inte ser
+    som rör: en stigare, ett schakt, en symbol. Punkten rapporteras med koordinater, etiketterna och antalet ledare.
+    """
+    ends: dict[str, tuple[float, float]] = {}
+    texts: dict[str, list[str]] = {}
+    for a in anchors:
+        if a.state != "NO_PIPE_ATTACHMENT":
+            continue
+        ends.setdefault(a.leader_id, (a.endpoint[0], a.endpoint[1]))
+        texts.setdefault(a.leader_id, []).append(a.designation)
+    radius = _rule("semantics.attachment.NEAR_ONE", LEADERS_MEET_RADIUS)
+    clusters: list[list[str]] = []
+    for lid in sorted(ends):
+        x, y = ends[lid]
+        home = next((c for c in clusters if any(math.hypot(ends[o][0] - x, ends[o][1] - y) <= radius for o in c)),
+                    None)
+        if home is None:
+            clusters.append([lid])
+        else:
+            home.append(lid)
+    least = int(_rule("output.artifacts.LEADERS_MEET_MIN", LEADERS_MEET_MIN))
+    out = []
+    for c in clusters:
+        labels = sorted(t for o in c for t in texts[o])
+        if len(labels) < least:
+            continue
+        cx = sum(ends[o][0] for o in c) / len(c)
+        cy = sum(ends[o][1] for o in c) / len(c)
+        out.append({"kind": "leaders_meet_without_pipe", "point": [round(cx, 2), round(cy, 2)],
+                    "n_labels": len(labels), "n_leaders": len(c), "texts": labels,
+                    "reason": "flera etiketters ledare slutar i samma punkt utan rör",
+                    "bbox": [cx - 5, cy - 5, cx + 5, cy + 5], "id": "meet:" + ",".join(sorted(c))})
+    return out
 
 
 def _from_image(pa) -> bool:
@@ -281,6 +325,10 @@ def unresolved_issues(pa) -> list[dict]:
     for d in pa.designations:
         if d.unknown_chars:
             issues.append({"kind": "uncertain_designation", "text": d.text, "bbox": list(d.bbox), "id": d.did})
+        if (d.evidence or {}).get("external_text_kept"):
+            # en säker extern läsning som bladets mönster ville läsa annorlunda: texten står, granskaren får se
+            issues.append({"kind": "external_label_against_grammar", "text": d.text, "bbox": list(d.bbox),
+                           "id": d.did, "grammar_would_read": d.evidence.get("grammar_would_read")})
         elif d.dn is None and _could_be_a_pipe_label(d):
             issues.append({"kind": "missing_dn", "text": d.text, "bbox": list(d.bbox), "id": d.did})
     with_leader = {a.designation_id for a in pa.anchors}
@@ -302,6 +350,12 @@ def unresolved_issues(pa) -> list[dict]:
             issues.append({"kind": "ambiguous_pipe_attachment", "text": a.designation, "reason": a.reason, "bbox": [a.endpoint[0] - 5, a.endpoint[1] - 5, a.endpoint[0] + 5, a.endpoint[1] + 5], "id": a.anchor_id})
         elif a.state == "NO_PIPE_ATTACHMENT":
             issues.append({"kind": "missing_pipe_attachment", "text": a.designation, "reason": a.reason, "bbox": [a.endpoint[0] - 5, a.endpoint[1] - 5, a.endpoint[0] + 5, a.endpoint[1] + 5], "id": a.anchor_id})
+    issues.extend(leaders_meeting_without_pipe(pa.anchors))
+    for u in (getattr(pa.ownership, "boundaries_undecided", None) or []) if pa.ownership else []:
+        x, y = u["point"]
+        issues.append({"kind": "contract_boundary_undecided", "text": u.get("note"), "reason": u["reason"],
+                       "point": u["point"], "bbox": [x - 5, y - 5, x + 5, y + 5],
+                       "id": f"boundary:{round(x, 1)},{round(y, 1)}"})
     for r in pa.ownership.ambiguous_runs:
         # An unresolved case is the least important thing in a reading and must never cost the reading itself.
         # A record naming a family or a primitive this graph does not hold is a defect worth seeing, not a
@@ -531,6 +585,10 @@ def sheet_reading(pa, doc, doc_legend=None, profile: dict | None = None,
     # it, and on a set it is by far the largest thing written - twenty-six copies of it is ninety per cent of a
     # reading's disk for something no page of the application opens. It is written once, with the sheet the
     # profile report is about, and the per-sheet copies carry the labels alone.
+    if getattr(pa, "external_labels", None):
+        out["external-labels.json"] = pa.external_labels
+    if getattr(pa, "layer_name_rule", None):
+        out["layer-name-rule.json"] = pa.layer_name_rule
     out["vector-designations.json"] = {"designations": des_out,
                                        **({"text_rows": [r.as_dict() for r in pa.lines]} if forensics else {})}
     # The set's list, but told from this sheet: whether the sheet in front of the reader is the one that wrote
@@ -588,7 +646,8 @@ def sheet_reading(pa, doc, doc_legend=None, profile: dict | None = None,
     out["pipe-topology.json"] = {"families": [{"family": fk, "nodes": [{"id": n.nid, "x": round(n.x, 2), "y": round(n.y, 2), "degree": n.degree, "prims": n.prims} for n in g.nodes.values()],
                                                "edges": [{"prim": pid, "a": ab[0], "b": ab[1]} for pid, ab in g.prim_nodes.items()], "bridges": g.bridges, "junctions": g.junctions, "gap_mode": g.gap_mode}
                                               for fk, g in pa.graphs.items()]}
-    out["physical-pipes.json"] = {"physical_pipes": [physical_pipe_dict(m) for m in pa.measures]}
+    anchor_conf = {a.anchor_id: a.evidence["confidence"] for a in pa.anchors if "confidence" in (a.evidence or {})}
+    out["physical-pipes.json"] = {"physical_pipes": [physical_pipe_dict(m, anchor_conf) for m in pa.measures]}
     out["pipe-extent-frontiers.json"] = extent_frontiers(pa)
     out["quantities.json"] = {"scale": pa.scale.as_dict(), "rows": pa.quantities,
                               "totals": {"physical_pipes": len(pa.measures),
@@ -600,7 +659,8 @@ def sheet_reading(pa, doc, doc_legend=None, profile: dict | None = None,
                                          "in_hatched_area_m": round(sum(q.get("in_hatched_area_m", 0.0) for q in pa.quantities), 3),
                                          "riser_labels": sum(q.get("riser_count", 0) for q in pa.quantities)},
                               "hatched_areas": [h.as_dict() for h in pa.hatch_families],
-                              "risers": pa.risers}
+                              "risers": pa.risers,
+                              **outside_contract(pa)}
     out["unresolved-issues.json"] = {"issues": unresolved_issues(pa)}
     out["evidence-graph.json"] = evidence_graph(pa)
     from ..reconcile import reconcile
@@ -710,8 +770,49 @@ def extent_frontiers(pa) -> dict[str, Any]:
             "summary": sm, "frontiers": rows}
 
 
-def physical_pipe_dict(m) -> dict[str, Any]:
+OUTSIDE_CONTRACT_CATEGORY = "utanför entreprenadgräns"
+
+
+def outside_contract(pa) -> dict[str, Any]:
+    """Sträckor bortom en entreprenadgräns: en egen kategori, varken bekräftad eller otilldelad (pipes/ownership)."""
+    own = pa.ownership
+    if own is None:
+        return {"outside_contract": [], "outside_contract_m": 0.0, "contract_boundaries_undecided": []}
+    mpp = pa.scale.meters_per_pt if pa.scale and pa.scale.meters_per_pt else None
+    rows = []
+    for r in getattr(own, "outside_contract", []) or []:
+        g = pa.graphs.get(r["family"])
+        geom = [[[round(g.prims[p].seg.x0, 2), round(g.prims[p].seg.y0, 2)],
+                 [round(g.prims[p].seg.x1, 2), round(g.prims[p].seg.y1, 2)]] for p in r["prims"]] if g else []
+        if r.get("cut_segment") and r["cut_outside_pt"] > 0:
+            geom.append(r["cut_segment"])        # den del av den kapade biten som ligger bortom gränsen
+        rows.append({"category": OUTSIDE_CONTRACT_CATEGORY, "designation": r["designation"], "identity": r["identity"],
+                     "system": r["system"], "dn": r["dn"], "family": r["family"], "boundary_point": r["point"],
+                     "note": r["note"], "note_bbox": r["note_bbox"], "length_pt": round(r["length_pt"], 3),
+                     "length_m": None if mpp is None else round(r["length_pt"] * mpp, 3),
+                     "cut_outside_pt": round(r["cut_outside_pt"], 3), "geometry": geom})
+    return {"outside_contract": rows,
+            "outside_contract_m": round(sum(r["length_m"] or 0.0 for r in rows), 3),
+            "contract_boundaries_undecided": list(getattr(own, "boundaries_undecided", []) or [])}
+
+
+def named_by_confidence(anchor_ids, anchor_conf: dict[str, float] | None) -> float | None:
+    """Konfidensen i det som namnger röret, när bara svagare tilldelningar gör det (SPEC 6.4.3 h.1-h.2).
+
+    En egen ledare som rör vid röret har ingen sådan siffra - den är full bevisning. Namnges röret bara av etiketter
+    utan ledare (0,8) eller av ledare som fångats strax före röret (0,7), gäller den bästa av dem.
+    """
+    if not anchor_conf or not anchor_ids or any(a not in anchor_conf for a in anchor_ids):
+        return None
+    return max(anchor_conf[a] for a in anchor_ids)
+
+
+def physical_pipe_dict(m, anchor_conf: dict[str, float] | None = None) -> dict[str, Any]:
     p = m.pipe
+    named_by = named_by_confidence(p.anchor_ids, anchor_conf)
+    ctier = tier(p.evidence, bool(getattr(p, "needs_review", False)), getattr(p, "flags", ()))
+    if named_by is not None and ctier == "sure":
+        ctier = "inferred"        # en etikett utan egen ledare på röret är aldrig säker
     return {"physical_pipe_id": p.physical_pipe_id, "page": p.page, "system": p.identity.system, "designation": p.identity.display,
             "identity": p.identity.key, "dn": p.identity.dn, "supporting_anchors": p.anchor_ids, "representation_family": p.family, "section_levels": p.section_levels,
             "geometry": [[[round(x, 2), round(y, 2)] for x, y in pl] for pl in p.points], "source_path_ids": p.source_paths,
@@ -722,7 +823,7 @@ def physical_pipe_dict(m) -> dict[str, Any]:
             "total_m": None if m.total_m is None else round(m.total_m, 3), "evidence_state": m.state, "evidence": p.evidence,
             "in_hatched_area_m": None if m.hatched_m is None else round(m.hatched_m, 3),
             "ambiguity_reason": None, "reasons": m.reasons, "needs_review": bool(getattr(p, "needs_review", False)),
-            "confidence_tier": tier(p.evidence, bool(getattr(p, "needs_review", False)), getattr(p, "flags", ())),
+            "confidence_tier": ctier, "anchor_confidence": named_by,
             "flags": list(getattr(p, "flags", ()) or ()),
             "frontier_reasons": list(p.frontier_reasons), "frontiers": list(getattr(p, "frontiers", []) or [])}
 

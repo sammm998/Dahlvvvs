@@ -31,7 +31,7 @@ SAME_PLACE_SHARE = 0.5
 # gånger närmare, och de fall där de ligger lika nära är fall ritningen inte har avgjort.
 UNIT_MARGIN = 1.5
 from ..text.model import Glyph, TextRow, make_row, project, row_axes
-from .grammar import DesignationGrammar, NOMINAL_SIZES, compress_pattern, dn_plausible, is_code_like, split_tokens, strip_count_prefix, strip_row_separator, word_readings
+from .grammar import DesignationGrammar, NOMINAL_SIZES, compress_pattern, dn_plausible, is_code_like, is_height_note, split_tokens, strip_count_prefix, strip_row_separator, word_readings
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -648,6 +648,8 @@ def _repair_clipped_words(page: RawPage, blocks: list[AnnotationBlock], word_cac
     repaired = 0
     for b in blocks:
         for ri, br in enumerate(b.rows):
+            if br.line.protected:
+                continue            # en säker extern läsning kompletteras inte heller
             gws = _words(br.line)
             parts = br.text_norm.split(" ") if br.text_norm else []
             if len(parts) != len(gws):
@@ -697,10 +699,16 @@ def extract_designations(page: RawPage, blocks: list[AnnotationBlock]) -> tuple[
     grammar = DesignationGrammar()
     # pass 1: observe all code-like word readings (drawing-local structure)
     word_cache: dict[tuple[str, int, int], list] = {}
+    full: dict[tuple[str, int, int], list] = {}       # skyddade ord: alla läsningar, för att se vad som avstods
+    kept_against_grammar: dict[tuple[str, int], str] = {}
     for b in blocks:
         for ri, br in enumerate(b.rows):
             for wi, w in enumerate(_words(br.line)):
                 rd = word_readings(w)
+                if br.line.protected:
+                    # en säker extern läsning skrivs aldrig om: bara läsningen som den står
+                    full[(b.bid, ri, wi)] = rd
+                    rd = [r for r in rd if r.flips == 0][:1] or rd[:1]
                 word_cache[(b.bid, ri, wi)] = (w, rd)
                 if any(is_code_like(r.text) for r in rd):
                     grammar.observe(rd)
@@ -712,6 +720,11 @@ def extract_designations(page: RawPage, blocks: list[AnnotationBlock]) -> tuple[
             for wi, _ in enumerate(_words(br.line)):
                 w, rd = word_cache[(b.bid, ri, wi)]
                 best = grammar.choose(rd)
+                if (b.bid, ri, wi) in full:
+                    would = grammar.choose(full[(b.bid, ri, wi)])
+                    if would.text != best.text:
+                        # bladets mönster hade velat läsa ordet annorlunda; den externa läsningen står, och det flaggas
+                        kept_against_grammar[(b.bid, ri)] = would.text
                 parts.append(best.text)
                 if is_code_like(best.text):
                     chosen_words.append(best.text)
@@ -751,7 +764,11 @@ def extract_designations(page: RawPage, blocks: list[AnnotationBlock]) -> tuple[
                     angle=br.line.angle,
                     layer=br.line.layer, source=br.line.source, glyph_scores=[g.score for g in gl], unknown_chars=sum(1 for g in gl if g.char == "?"),
                     evidence={"pattern_count": fam.count if fam else 0, "underlined": bool(br.underline),
-                              "block_rows": len(b.rows), "frame_layers": dict(b.frame_layers), "word_index": wi},
+                              "block_rows": len(b.rows), "frame_layers": dict(b.frame_layers), "word_index": wi,
+                              **({"external_text_kept": True,
+                                  "grammar_would_read": kept_against_grammar[(b.bid, ri)]}
+                                 if (b.bid, ri) in kept_against_grammar else {}),
+                              **({"external_protected": True} if br.line.protected else {})},
                     family=f"grammar:{pat}"))
                 stats["designations"] += 1
     designations.sort(key=lambda d: d.did)
@@ -793,7 +810,10 @@ def _row_role(text: str, br: BlockRow, b: AnnotationBlock) -> str:
             # "600X300" is two sizes, and the cross between them is not a qualifier.
             or _QUALIFIED_SIZE.fullmatch(mq.group(2))):
         return "dn"
-    # elevation: short letter tag + signed number (VG+1.67, CL 4000, FG +19.82)
+    # elevation: short letter tag + signed number (VG+1.67, CL 4000, FG +19.82), and the height notes CL/VG in
+    # every sign the drawings write (VG+-563, VG±828) - never a pipe designation
+    if is_height_note(t):
+        return "elevation"
     if ELEV_RE.match(t.replace(" ", "")) or (len(words) == 2 and re.fullmatch(r"[A-ZÅÄÖ]{1,4}", words[0]) and re.fullmatch(r"[+\-]?\d+[.,]?\d*", words[1])):
         return "elevation"
     if len(words) == 1 and is_code_like(words[0]) and _has_separator_or_prefix(words[0]):

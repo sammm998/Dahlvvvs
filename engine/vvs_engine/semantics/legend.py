@@ -36,6 +36,17 @@ def _R(rule_id, default):
     return _rules.value(rule_id, default)
 
 
+# Dimensioner som rör tillverkas i (mm eller DN): koppar, stål (DN och ytterdiameter), plast, PEX, rostfritt.
+# Ett tal efter en kod som inte är en rördimension (V50-02-271, ett ritningsnummer) gör inte texten till ett rör.
+PIPE_SIZES = frozenset({
+    6, 8, 10, 12, 14, 15, 16, 18, 20, 21, 22, 25, 26, 27, 28, 32, 34, 35, 40, 42, 48, 50, 54, 56, 60, 63, 64, 65,
+    67, 70, 75, 76, 80, 88, 89, 90, 100, 108, 110, 114, 125, 133, 139, 140, 150, 159, 160, 168, 180, 200, 219,
+    225, 250, 273, 280, 300, 315, 323, 350, 355, 400, 450, 500, 560, 600, 630, 700, 800, 900, 1000, 1200})
+PIPE_SIZES_ONLY = True
+PLACEHOLDER_IS_SYSTEM = True
+# en systemmall: bokstäver, platshållaren för systemnumret och ett materialled (KBXX-6, VSXX-22) – inte en
+# objektmall som BXXX eller TSXXX, där platshållaren står för löpnumret
+_SYSTEM_TEMPLATE = re.compile(r"^[A-ZÅÄÖ]+X{2,}-[A-Z0-9]+$")
 MIN_ENTRIES = 6                 # a shorter stack is a table cell or a note, not a designation list
 MIN_CODES = 6                   # ...and it must say six different things, or it is one table column repeated
 USED_MIN = 2                    # codes the drawing writes out itself, for the list to be its own vocabulary
@@ -219,6 +230,9 @@ class DrawingLegend:
         refuse a code it lists as something other than a run, and may not refuse a code it has never heard of -
         which is what it would be doing if silence counted as a verdict. That keeps the borrowing one-directional:
         it can take away a label the set itself calls a floor drain, and it can never take away a pipe."""
+        dn = getattr(designation, "dn", None)
+        if _R("semantics.legend.PIPE_SIZES_ONLY", PIPE_SIZES_ONLY) and dn is not None and dn not in PIPE_SIZES:
+            return False        # V50-02-271: ingen rördimension – en hänvisning till en annan ritning
         systems = self.systems()
         if not systems:
             return True
@@ -749,7 +763,12 @@ def assign_roles(legend: DrawingLegend, designations, prior: dict[str, str] | No
         # bredvid koden; att gissa det ur användningen när det står där är att gissa i onödan - och gissningen
         # blev fel åt det dyra hållet, med kanalmeter under ett tilluftsdon.
         said = role_from_words(e.description)
-        if said == "component" and c in writes_a_pipe:
+        if (_R("semantics.legend.PLACEHOLDER_IS_SYSTEM", PLACEHOLDER_IS_SYSTEM) and said != "component"
+                and _SYSTEM_TEMPLATE.match(c)):
+            # `KBXX-6 KÖLDBÄRARE, ROSTFRITT STÅL`: platshållaren står för systemnumret ("XX AVSER
+            # SYSTEMBETECKNING") – koden är en mall för rörbeteckningar även när beskrivningen nämner materialet
+            e.role, e.role_from = "system", "placeholder_is_a_system_template"
+        elif said == "component" and c in writes_a_pipe:
             e.role, e.role_from = "system", "the_sheet_writes_it_as_a_pipe"
         elif said is not None:
             e.role, e.role_from = said, "the_list_says_so"

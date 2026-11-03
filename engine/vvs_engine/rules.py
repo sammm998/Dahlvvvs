@@ -172,6 +172,18 @@ RULES: tuple[Rule, ...] = (
          "pt", 8.0, 0.0, 30.0, None, True),
 
     # ---- förklaringslistan -------------------------------------------------------------------------------
+    Rule("text.external_labels.SPLIT_PIPE_LISTS", G_LABEL, "Rörlista på en rad blir ett knippe",
+         "En extern etikett som är en lista av rörbeteckningar (KV02-53-,VV02-53-20) delas i en rad per rör, "
+         "staplade i listans ordning; ett led utan dimension ärver listans sista dimension.",
+         "", True, None, None, None, True),
+    Rule("semantics.legend.PLACEHOLDER_IS_SYSTEM", G_LEGEND, "En kod med platshållare är ett system",
+         "En listkod med XX för systemnumret (KBXX-6, VSXX-2) är en mall för rörbeteckningar, även när beskrivningen "
+         "nämner materialet. Av: rollen tas ur beskrivningens ord.",
+         "", True, None, None, None, True),
+    Rule("semantics.legend.PIPE_SIZES_ONLY", G_LEGEND, "Bara rördimensioner gör en text till ett rör",
+         "En beteckning vars dimension inte är en dimension som rör tillverkas i (t.ex. V50-02-271, en hänvisning "
+         "till en annan ritning) namnger inget rör. Av: varje tal efter koden räknas som dimension.",
+         "", True, None, None, None, True),
     Rule("semantics.legend.MIN_ENTRIES", G_LEGEND, "Kortaste lista som är en lista",
          "Hur många rader en kolumn av koder måste ha för att räknas som handlingens förklaringslista och inte "
          "som en tabellcell eller en notering.",
@@ -268,6 +280,78 @@ RULES: tuple[Rule, ...] = (
          "antal", 2, 1, 20, "layers", True),
 
     # ---- beteckningar ------------------------------------------------------------------------------------
+    Rule("pipes.ownership.PROPAGATE_TO_STOPS", G_OWN, "Spridning till stopp, grenar ärver",
+         "En etikett gäller längs röret tills ny etikett, symbol, dimensionsbyte eller entreprenadgräns, utan "
+         "längdbudget; en gren utan egen etikett ärver system och material med osäker dimension "
+         "(VS-Kalkyl SPEC 6.4.3 h.3). Av: flödesbudgeten och kravet på bevis i grenens ände gäller.",
+         "", True, None, None, None, True),
+    Rule("pipeline.GENERIC_SYSTEM_LAYER", G_OWN, "Disciplinens allmänna lager är rörlager",
+         "Ett lager som följer rörlagrens namnmall men har systemledet tomt (V-53-FE-_- bredvid V-53-FE-_S02-), med "
+         "samma penna, räknas som rörgeometri (namnges av etiketter som andra rör).",
+         "", True, None, None, None, True),
+    Rule("pipes.representation.SMALL_CLOSED_FIGURES_ARE_NOT_PIPE", G_OWN, "Sluten liten form är inte rör",
+         "En sluten väg i rörpennan som är högst SMALL_FIGURE_MAX_PT stor åt båda håll (pilspets, symbol) räknas "
+         "aldrig som rörlängd (beslut användare 2026-11-03: pilspetsar).",
+         "", True, None, None, None, True),
+    Rule("pipes.representation.SMALL_FIGURE_MAX_PT", G_OWN, "Största slutna form som inte är rör",
+         "Lådans största sida för en sluten form som räknas som pilspets eller symbol.", "pt", 12.0, 2.0, 40.0,
+         None, True),
+    Rule("pipes.representation.CLOSE_TOL_PT", G_OWN, "Sluten form",
+         "Så nära ska formens första och sista punkt ligga för att formen ska vara sluten.", "pt", 0.5, 0.05, 3.0,
+         None, True),
+    Rule("pipes.ownership.DEAD_END_LABEL_KEEPS_DN", G_OWN, "Återvändsgren behåller sin etiketts dimension",
+         "En etikett med dimension som pekar på en återvändsgren eller symbolen i dess ände, där grenen saknar annan "
+         "etikett, ger grenen etikettens dimension – före regeln att korsningens grövre dimension går in i en gren "
+         "som bara bär symboletiketter (beslut användare 2026-11-03). Av: korsningens dimension går före.",
+         "", True, None, None, None, True),
+    Rule("pipes.ownership.CONTRACT_BOUNDARIES", G_OWN, "Entreprenadgräns kapar röret",
+         "En not som ENTR. GRÄNS med ledare till ett rör kapar röret där; sidan utan egen etikett är utanför "
+         "entreprenaden och räknas för sig, varken bekräftad eller otilldelad. Av: gränsnoter läses inte.",
+         "", True, None, None, None, True),
+    Rule("semantics.boundary.START_REACH", G_OWN, "Gränsnotens ledare börjar vid texten",
+         "Så nära notens textlåda, i texthöjder, måste ett streck börja för att vara notens ledare "
+         "(understrykningen ligger en bit under texten).",
+         "texthöjder", 0.5, 0.1, 2.0, None, True),
+    Rule("semantics.boundary.JOIN_TOL", G_OWN, "Ledarens streck sitter ihop",
+         "Två streck vars ändar ligger så nära varandra är en och samma ledare.",
+         "pt", 1.0, 0.1, 5.0, None, True),
+    Rule("semantics.boundary.MAX_STROKES", G_OWN, "En ledare är några få streck",
+         "Växer kedjan från noten till fler streck än så har den vuxit in i ritningen, och noten får ingen punkt.",
+         "antal", 6, 1, 50, None, True),
+    Rule("semantics.boundary.BOUNDARY_REACH", G_OWN, "Gränsledaren slutar vid röret",
+         "Så långt från röret får gränsnotens ledare sluta och ändå peka på det (som en fångad ledarände, h.1).",
+         "pt", 6.0, 0.0, 20.0, None, True),
+    Rule("pipes.ownership.FLOW_MESH_CYCLES", G_OWN, "När spridd geometri är ett nät",
+         "Har det ett namn spridits in i så här många oberoende slingor är det ett nät - väggar, ett rutnät - och "
+         "längdbudgeten gäller där. En enda slinga kan vara en ledning som går runt och möter sig själv.",
+         "antal", 2, 1, 10, None, True),
+    Rule("semantics.attachment.NEAR_MISS_NEAREST", G_LEADER, "Ledarände nära flera rör: ta det närmaste",
+         "En ledare som stannat strax före röret fångas av det närmaste röret inom räckhåll (2 × normal "
+         "tolerans), om inget annat ligger nästan lika nära (AMBIGUITY_RATIO). Av: då fångas den bara när en "
+         "enda sak ligger inom räckhåll.",
+         "", True, None, None, None, True),
+    Rule("semantics.attachment.NEAR_MISS_CONFIDENCE", G_LEADER, "Konfidens för en fångad ledarände",
+         "Ett rör som bara får sitt namn genom en ledare som stannat före det (VS-Kalkyl SPEC 6.4.3 h.1).",
+         "andel", 0.7, 0.0, 1.0, None, True),
+    Rule("output.artifacts.LEADERS_MEET_MIN", G_LEADER, "Etiketter vars ledare möts utan rör",
+         "Så många etiketter vars ledare slutar i samma punkt där inget rör finns rapporteras, med punkten - "
+         "en gemensam ledare från ett staplat block eller flera ledare som möts. Där pekar ritningen på något "
+         "läsningen inte ser som rör (en stigare, ett schakt).",
+         "antal", 3, 2, 20, None, True),
+    Rule("semantics.proximity.LEADERLESS_MM", G_LABEL, "Etikett utan ledare: hur nära röret",
+         "En rörbeteckning utan ledare tillhör det närmaste rör som löper parallellt med texten, om det ligger "
+         "så här nära på papperet (VS-Kalkyl SPEC 6.4.3 h.2).",
+         "mm", 6.0, 0.0, 20.0, None, True),
+    Rule("semantics.proximity.PARALLEL_DEG", G_LABEL, "Etikett utan ledare: hur parallellt",
+         "Så mycket får röret avvika från textens riktning och ändå räknas som det röret etiketten skrivits längs.",
+         "grader", 10.0, 0.0, 45.0, None, True),
+    Rule("semantics.proximity.AMBIGUITY_RATIO", G_LABEL, "Etikett utan ledare: när två rör är lika nära",
+         "Ligger ett annat rör högst så här många gånger så långt bort som det närmaste är tilldelningen "
+         "tvetydig och ingen meter bekräftas.",
+         "gånger", 1.5, 1.0, 5.0, None, True),
+    Rule("semantics.proximity.CONFIDENCE", G_LABEL, "Etikett utan ledare: konfidens",
+         "Hur säker en tilldelning utan ledare är (en ledare ger 0,95).",
+         "andel", 0.8, 0.0, 1.0, None, True),
     Rule("pipeline.LABELS_MUST_REACH", G_LABEL, "Hur mycket en läsning måste nå",
          "Andelen av bladets rörbeteckningar som måste nå ett rör för att läsningen ska räknas som den rätta av "
          "två möjliga läsningar av bladet.",

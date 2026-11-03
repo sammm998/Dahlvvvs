@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -12,6 +13,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable
+
+_log = logging.getLogger(__name__)
 
 from .geometry.core import stable_id
 from .pdf.extract import RawDocument, RawPage, extract_document
@@ -25,6 +28,9 @@ from .profile.hatch import HatchFamily, discover_hatch, inside_hatch
 from .semantics.annotation import (AnnotationBlock, Designation, build_blocks, extract_designations,
                                     free_segments, merge_lines, one_reading_per_place)
 from .text.model import project, row_axes
+from .semantics.proximity import leaderless_anchors
+from .semantics.boundary import find_contract_boundaries
+from .pipes.ink import is_stroked
 from .semantics.attachment import (GeometryIndex, PathsByPlace, PipeCodeAnchor, family_of, layer_system_tokens,
                                    leader_contacts, resolve_block, system_layer_match)
 from .semantics.legend import (DrawingLegend, adopt, assign_roles, number_as_listed, opens_with, read_legend,
@@ -135,6 +141,8 @@ class PageAnalysis:
     frontiers: list[dict] = field(default_factory=list)   # var varje rör slutar och varför (pipes/frontier.py)
     register: dict | None = None            # varje beteckning bladet skriver, i läget "Alla" (register.py)
     wide_runs: list[dict] = field(default_factory=list)   # andra discipliners ledningar, i läget "Alla" (widened_runs)
+    external_labels: dict | None = None     # vad en extern etikettfil (text/external_labels.py) gjorde med bladet
+    layer_name_rule: dict | None = None     # lagerregeln: på/av, och familjerna som bara den tog in som rör
 
 
 # A label over a bundle has found its pipes - the leader landed on as many drawn parallel lines as the block has
@@ -143,6 +151,25 @@ class PageAnalysis:
 # only after the reading has been chosen. Counting it as a miss let a reading that had found nothing but the
 # heating pipes beat one that had found the water and waste runs it was being asked about.
 FOUND_ITS_PIPES = ("multi_row_bundle_awaiting_elimination",)
+
+
+EXTERNAL_LABEL_UNCERTAIN = "EXTERNAL_LABEL_UNCERTAIN"
+
+
+def _names_from_uncertain_labels(report, designations, blocks, anchors) -> set[str]:
+    """Ankarna vars beteckning (eller dess dimensionsrad) står på en rad ur etikettfilen som läsaren flaggade."""
+    if report is None or not report.uncertain_rids:
+        return set()
+    by_id = {b.bid: b for b in blocks}
+    shaky: set[str] = set()
+    for d in designations:
+        b = by_id.get(d.block_id)
+        if b is None:
+            continue
+        rows = [d.row_index] + ([d.dn_row_index] if d.dn_row_index is not None else [])
+        if any(0 <= ri < len(b.rows) and b.rows[ri].line.rid in report.uncertain_rids for ri in rows):
+            shaky.add(d.did)
+    return {a.anchor_id for a in anchors if a.designation_id in shaky}
 
 
 def reached_labels(anchors, pipe_labels: set[str]) -> set[str]:
@@ -960,10 +987,11 @@ class PreparedPage:
     timings: dict
     vt_timing: dict
     declarations: Declarations = field(default_factory=Declarations)
+    label_report: Any = None        # text/external_labels.LabelReport när en etikettfil användes
 
 
 def prepare_page(page: RawPage, progress: Callable[[str], None] | None = None, ocr_assist: bool = False,
-                 film: "Film | None" = None) -> PreparedPage:
+                 film: "Film | None" = None, external_labels: Any = None) -> PreparedPage:
     """Read the sheet as far as its own words go, and no further."""
     timings: dict[str, float] = {}
     film = film or Film(None)
@@ -1023,6 +1051,14 @@ def prepare_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     # ställe, den bättre av de två.
     twice: dict = {}
     lines = one_reading_per_place(lines, twice)
+    label_report = None
+    if external_labels is not None:
+        # Etiketter som en annan läsare redan läst tecken för tecken: texten byts, motorns geometri behålls.
+        lines, label_report = external_labels.apply(lines, page.info.index, page)
+        if film:
+            film.note("READING_DESIGNATIONS",
+                      f"Etikettfilen: {label_report.labels} etiketter, {label_report.changed} rader fick ny text, "
+                      f"{label_report.added} nya, {label_report.uncertain} osäkra (granskas).")
     consumed = set(pid for r in vtext.rows for pid in r.provenance) | set(pid for m in vtext.marks for pid in m.path_ids)
     free = free_segments(page, consumed)
     blocks = build_blocks(page, lines, free)
@@ -1053,7 +1089,8 @@ def prepare_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     _t(timings, "designation_ms", t0)
     return PreparedPage(page=page, layer_stats=layer_stats, vtext=vtext, srows=srows, lines=lines, blocks=blocks,
                         free=free, consumed=consumed, designations=designations, grammar=grammar, legend=legend,
-                        ocr_report=ocr_report, timings=timings, vt_timing=vt_timing, declarations=declarations)
+                        ocr_report=ocr_report, timings=timings, vt_timing=vt_timing, declarations=declarations,
+                        label_report=label_report)
 
 
 def rows_needing_a_pipe(rows: list, pipe_labels: set[str]) -> list:
@@ -1081,7 +1118,8 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
                  known_scale_pages: list[int] | None = None,
                  given_scale: float | None = None,
                  prepared: "PreparedPage | None" = None,
-                 source_mode: str | None = None, source_ask=None, source_style="auto", source_detector=None) -> PageAnalysis:
+                 source_mode: str | None = None, source_ask=None, source_style="auto", source_detector=None,
+                 external_labels: Any = None, layer_name_families: bool | None = None) -> PageAnalysis:
     """second_reader: an optional transport for putting the reading's own open cases to a language model.
 
     Without it - the default, and what every test and every reference run uses - nothing is asked, the analysis
@@ -1092,7 +1130,12 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     film = Film(film_sink)
     # The front half of the reading says what it is finding as it finds it, so a prepared sheet must not say it
     # all a second time: it was said when it was worked out.
-    prep = prepared if prepared is not None else prepare_page(page, progress, ocr_assist, film)
+    prep = prepared if prepared is not None else prepare_page(page, progress, ocr_assist, film, external_labels)
+    # Lagerregeln (ett lager som bär systemkoden för en av bladets egna rörbeteckningar är en rörfamilj) gäller
+    # som standard bara på blad där en extern etikettfil har använts: utan den kan motorn ofta inte läsa
+    # systemens etiketter, och regeln gör då bara mer rör synligt utan namn. None = så; True/False = alltid/aldrig.
+    use_layer_names = (prep.label_report is not None) if layer_name_families is None else bool(layer_name_families)
+    by_layer_name: set[str] = set()     # familjer som bara regeln tog in - loggas
     timings = dict(prep.timings)
     layer_stats, vtext, srows = prep.layer_stats, prep.vtext, prep.srows
     lines, blocks, free, designations, grammar = prep.lines, prep.blocks, prep.free, prep.designations, prep.grammar
@@ -1307,10 +1350,22 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
                       f"ledarfamilj={f in leader_fams}  {f}", file=sys.stderr)
         # evaluate the vector structure of every voted family first (kind: fragmented-dashed / continuous / sparse)
         voted = sorted(f for f in votes if f not in leader_fams)
+        # A layer whose name carries the system code of one of the sheet's own pipe labels is the drawing saying
+        # which geometry is that system - as much a statement as a leader landing on it, and one that does not
+        # depend on a leader happening to be traced there. Without it a system's pipe layer was taken only when
+        # some leader voted for it, and on a sheet whose labels point at riser symbols and tick marks the layer
+        # came in, if at all, on the strength of a neighbour's pen: reading one more note beside a label moved a
+        # line to that note and fifteen metres of drainage went unmeasured. Such a layer still has to look like
+        # pipe (has_pipe_run) and be drawn heavier than the sheet writes with; the text layer of the same system
+        # carries the same code and is neither.
+        named_set = {fk for fk in set(fam_ink) | set(votes)
+                     if use_layer_names and fk.split("|s|")[0] in named_pipe_layers and fk not in leader_fams}
+        named_fams = sorted(named_set - set(voted))
         figures: dict[str, list] = {}
-        prims_all = collect_prims(page, set(voted), exclude_pids=annotation_pids | glyph_pids, figures_out=figures)
+        prims_all = collect_prims(page, set(voted) | set(named_fams), exclude_pids=annotation_pids | glyph_pids,
+                                  figures_out=figures)
         desc: dict[str, tuple] = {}
-        for fk in voted:
+        for fk in voted + named_fams:
             if not prims_all.get(fk):
                 continue
             g = build_graph(prims_all[fk], fk, graph_tolerances(page), symbols=page_symbols(page))
@@ -1356,10 +1411,18 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
         best_ticks = max((tick_votes[f] for f in chain_voted), default=0)
         best_votes = max((votes[f] for f in chain_voted), default=0.0)
         best_leaders = max((leader_votes[f] for f in chain_voted), default=0)
-        for f in voted:
+        for f in voted + named_fams:
             if not chain_like(f):
                 continue
             layer, style = f.split("|s|")
+            by_name = f in named_set and desc[f][0].width > annotation_width + 1e-6
+            if f in named_fams:
+                # no vote of its own: only the layer rule can take it, and only if it is drawn as pipe is drawn
+                if by_name:
+                    pipe_families[f] = desc[f][0]
+                    graphs[f] = desc[f][1]
+                    by_layer_name.add(f)
+                continue
             # With no layer name to vouch for anything, the pens have to be told apart by how they are drawn. A
             # draughtsman does not draw a pipe fainter than the line that points at it: the leaders are the
             # sheet's own annotation weight, and ink below it is construction lines, hatching and grids.
@@ -1396,6 +1459,10 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
             # between them and every one of them falls short. So a family is measured against the best family
             # rather than against the sum: several pens carrying comparable numbers of label ends are several
             # systems, while the sheet's background carries almost none however the rest is divided.
+            if not accept and by_name:
+                # named by the sheet's own pipe labels, looks like pipe, and heavier than the writing pen
+                accept = True
+                by_layer_name.add(f)
             if accept:
                 pipe_families[f] = desc[f][0]
                 graphs[f] = desc[f][1]
@@ -1486,6 +1553,11 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
             if not contacts and ld.length < 2.5 * max(block.height, 1.0) and not ld.end_marks:
                 continue        # dangling frame stub, not a leader
             anchors.extend(resolve_block(block, rows, ld, contacts, system_tokens, spelled_out, paths, gidx))
+        # En rörbeteckning utan ledare tillhör det närmaste parallella röret (VS-Kalkyl SPEC 6.4.3 h.2).
+        if pf:
+            anchors.extend(leaderless_anchors(
+                designations, pipe_labels, {ld.block_id for ld in leaders}, {a.designation_id for a in anchors},
+                {f: graphs[f] for f in pf if f in graphs}))
         anchors.sort(key=lambda a: a.anchor_id)
         stats = {"votes": dict(votes.most_common()), "token_votes": dict(token_votes.most_common()), "candidate_families": sorted(pipe_families), "tick_votes": dict(tick_votes.most_common()),
                  "leader_votes": dict(leader_votes.most_common()), "declined_families": declined,
@@ -1519,8 +1591,9 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     for a in anchors:
         if a.state != "VERIFIED_PIPE_ATTACHMENT":
             continue
-        ld = next(l for l in leaders if l.lid == a.leader_id)
-        ann_layers[stroke_family(ld.layer, ld.width, ld.color)] += 1
+        ld = next((l for l in leaders if l.lid == a.leader_id), None)
+        if ld is not None:          # en etikett utan ledare (semantics/proximity.py) har ingen ledarpenna
+            ann_layers[stroke_family(ld.layer, ld.width, ld.color)] += 1
         b = block_by_id[a.block_id]
         for r in b.rows:
             for u in r.underline:
@@ -1880,22 +1953,29 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
                 # labels as native_label_<id>, and the viewer lights exactly those when the pipe is picked
                 'labels': _native_label_marks(native)}
     else:
+        # entreprenadgränser: noter med en kort ledare till ett rör (semantics/boundary.py)
+        strokes = [sg for p in page.paths if is_stroked(p) and family_of(p) not in graphs for sg in p.segs]
+        contract_boundaries = find_contract_boundaries(page.info.index, blocks, strokes, graphs)
         ownership = propagate(graphs, anchors, page.info.index, identities, spelled_out,
-                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev)
+                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev,
+                              boundaries=contract_boundaries)
         if _settle_bundles_by_elimination(anchors, ownership, graphs):
             identities = _identities_now()
             ownership = propagate(graphs, anchors, page.info.index, identities, spelled_out,
-                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev)
+                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev,
+                              boundaries=contract_boundaries)
         # and what one bundle at a time cannot settle, the sheet taken as a whole sometimes can
         if settle_bundles_by_sheet_consistency(anchors, graphs, known_families):
             identities = _identities_now()
             ownership = propagate(graphs, anchors, page.info.index, identities, spelled_out,
-                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev)
+                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev,
+                              boundaries=contract_boundaries)
         # ...and last, what the sheet's own settled bundles say about the order its rows are written in
         if _settle_bundles_by_the_sheets_own_row_order(anchors, page):
             identities = _identities_now()
             ownership = propagate(graphs, anchors, page.info.index, identities, spelled_out,
-                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev)
+                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev,
+                              boundaries=contract_boundaries)
         _close_labels_on_owned_runs(anchors, ownership, graphs)
     film.pipes(ownership.pipes)
     t0 = _t(timings, "physical_pipes_ms", t0)
@@ -1955,6 +2035,13 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
             pp.needs_review = True
             if RASTER_FLAG not in pp.flags:
                 pp.flags.append(RASTER_FLAG)
+    uncertain_names = _names_from_uncertain_labels(prep.label_report, designations, blocks, anchors)
+    if uncertain_names:
+        for pp in ownership.pipes:
+            if set(pp.anchor_ids) & uncertain_names:
+                pp.needs_review = True      # namnet kommer från en etikett läsaren själv inte var säker på
+                if EXTERNAL_LABEL_UNCERTAIN not in pp.flags:
+                    pp.flags.append(EXTERNAL_LABEL_UNCERTAIN)
     measures = measure_pipes(ownership, scale, elevations, hatched_pt, from_image=from_image)
     risers = _riser_symbols(page, ann_layers, glyph_pids, graphs, ownership, anchors, identities)
     label_risers = _risers_from_dn_rows(designations, anchors, leaders, identities)
@@ -1987,7 +2074,21 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     film.measured(quantities, scale)
     t0 = _t(timings, "measurement_ms", t0)
     timings.update({f"text_{k}": v for k, v in vt_timing.items()})
-    pa = PageAnalysis(page=page, legend=legend, declarations=declarations, second_reader=second, source_assignment=source_assignment, layer_stats=layer_stats, vtext=vtext, srows=srows, lines=lines, blocks=blocks,
+    layer_rule = None
+    if use_layer_names:
+        added = sorted(by_layer_name & set(pipe_families))
+        layer_rule = {"enabled": True, "why": "extern etikettfil" if layer_name_families is None else "begärd",
+                      "families_added": added}
+        if added:
+            _log.info("Lagerregeln tog in %d rörfamilj(er) på blad %d: %s", len(added), page.info.index,
+                      ", ".join(added))
+            if film:
+                film.note("RESOLVING_PIPE_REPRESENTATION",
+                          "Lagerregeln: " + ", ".join(f.split("|s|")[0] for f in added)
+                          + " bär systemkoden för bladets egna rörbeteckningar och räknas som rör.")
+    pa = PageAnalysis(page=page, layer_name_rule=layer_rule,
+                      external_labels=(prep.label_report.as_dict() if prep.label_report else None),
+                      legend=legend, declarations=declarations, second_reader=second, source_assignment=source_assignment, layer_stats=layer_stats, vtext=vtext, srows=srows, lines=lines, blocks=blocks,
                       designations=designations, grammar=grammar, ann_layers=ann_layers, leaders=leaders,
                       pipe_families=pipe_families, prims=prims, graphs=graphs, anchors=anchors, contact_stats=contact_stats,
                       ownership=ownership, scale=scale, measures=measures, quantities=quantities, elevations=elevations,
@@ -2458,6 +2559,7 @@ def _is_an_apparatus_tag(d, legend) -> bool:
 # den ska ha visat sig känna igen innan den får göra det. Båda finns för att en lista som inte täcker bladets
 # rörordförråd aldrig ska kunna radera ett rör den bara råkat utelämna.
 LEGEND_MIN_ENTRIES = 8
+GENERIC_SYSTEM_LAYER = True
 LEGEND_MIN_KNOWN_HEADS = 3
 
 
@@ -2541,7 +2643,7 @@ def _is_vertical_label(d) -> bool:
     return d.dn_source == "row" and d.dn is not None and d.multiplier <= 1
 
 
-ELEV_TAG_RE = __import__("re").compile(r"^([A-ZÅÄÖ]{1,4})\s*([+\-]?)\s*(\d+[.,]?\d*)$")
+ELEV_TAG_RE = __import__("re").compile(r"^([A-ZÅÄÖ]{1,4})\s*(\+-|-\+|±|[+\-=]?)\s*(\d+[.,]?\d*)$")
 
 
 def _elevations(blocks, anchors) -> dict[str, list[dict]]:
@@ -2569,12 +2671,15 @@ def _elevations(blocks, anchors) -> dict[str, list[dict]]:
                     continue
                 if m.group(2) == "-":
                     v = -v
+                sign_open = m.group(2) in ("+-", "-+", "±")    # tecknet enligt konsulten: höjden är inte känd
                 # The unit is what the drawing wrote, not what the number looks like. A decimal separator is a
                 # level in metres ("VG+1,67"); a whole number of a thousand or more is millimetres ("CL 4000").
                 # A bare small integer says neither, and guessing there turns 100 and 150 into fifty metres of
                 # pipe. Such a value is carried with no unit and no vertical length is claimed from it.
                 digits = m.group(3)
                 unit = "m" if ("." in digits or "," in digits) else ("mm" if abs(v) >= 1000 else None)
+                if sign_open:
+                    unit = None         # ingen lodrät längd ur en höjd vars tecken inte är avgjort
                 ev.append({"tag": m.group(1), "value": v, "unit": unit,
                            "text": r.text_norm, "row_id": r.line.rid})
         if ev:
@@ -2645,6 +2750,11 @@ def _generalize_families(page: RawPage, pipe_families: dict, graphs: dict, never
         toks = layer_tokens(layer)
         for (n, tpl) in templates:
             if len(toks) == n and all(t == "*" or t == toks[i] for i, t in enumerate(tpl)):
+                add.add(fk)
+            elif (_R("pipeline.GENERIC_SYSTEM_LAYER", GENERIC_SYSTEM_LAYER) and len(toks) == n - 1
+                  and tpl[-1] == "*" and all(t == toks[i] for i, t in enumerate(tpl[:-1]))):
+                # mallens lager med systemledet tomt (`V-53-FE-_-` bredvid `V-53-FE-_S02-`): disciplinens
+                # allmänna lager, där ritaren lagt delar av samma ledningar
                 add.add(fk)
     if add:
         prims = collect_prims(page, add)
@@ -2728,15 +2838,20 @@ def reading_coverage(pa: PageAnalysis) -> dict[str, Any]:
         return name in measured or any(m.startswith(name + "-") or name.startswith(m + "-") for m in measured)
 
     got = {n for n in named if carried(n)}
-    ink = {"drawn_pt": 0.0, "confirmed_pt": 0.0, "ambiguous_pt": 0.0, "unowned_pt": 0.0}
+    ink = {"drawn_pt": 0.0, "confirmed_pt": 0.0, "ambiguous_pt": 0.0, "unowned_pt": 0.0, "outside_contract_pt": 0.0}
     for fk, g in (pa.graphs or {}).items():
         states = (pa.ownership.prim_states if pa.ownership else {}).get(fk, {})
         for pid, prim in g.prims.items():
             L = prim.seg.length
             ink["drawn_pt"] += L
             st = states.get(pid)
-            key = {"CONFIRMED": "confirmed_pt", "AMBIGUOUS": "ambiguous_pt"}.get(getattr(st, "state", ""), "unowned_pt")
+            key = {"CONFIRMED": "confirmed_pt", "AMBIGUOUS": "ambiguous_pt",
+                   "OUTSIDE_CONTRACT": "outside_contract_pt"}.get(getattr(st, "state", ""), "unowned_pt")
             ink[key] += L
+    # den kapade biten vid en entreprenadgräns: delen bortom gränsen är utanför, inte bekräftad
+    cut = sum(r["cut_outside_pt"] for r in (getattr(pa.ownership, "outside_contract", None) or []))
+    ink["confirmed_pt"] -= cut
+    ink["outside_contract_pt"] += cut
     # Utan skala finns inga meter att redovisa - och noll meter är inte svaret. Ett blad vars skala aldrig blev
     # fastställd har ritat rör i punkter men ingen omräkning till meter, och att då skriva "0 m ritat rör" säger
     # att bladet är tomt när sanningen är att frågan inte gick att besvara. Metertalen lämnas därför som None,
@@ -2757,6 +2872,7 @@ def reading_coverage(pa: PageAnalysis) -> dict[str, Any]:
         "missed": [{"name": n, "rects": places[n][:6]} for n in sorted(missing)][:60] if places else [],
         "drawn_m": metres(ink["drawn_pt"]), "confirmed_m": metres(ink["confirmed_pt"]),
         "ambiguous_m": metres(ink["ambiguous_pt"]), "unowned_m": metres(ink["unowned_pt"]),
+        "outside_contract_m": metres(ink["outside_contract_pt"]),
         "drawn_pt": round(ink["drawn_pt"], 2), "confirmed_pt": round(ink["confirmed_pt"], 2),
         "ambiguous_pt": round(ink["ambiguous_pt"], 2), "unowned_pt": round(ink["unowned_pt"], 2),
         "scale_state": (pa.scale.state if pa.scale else "NONE"),

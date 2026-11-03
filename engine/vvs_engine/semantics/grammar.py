@@ -84,6 +84,17 @@ def compress_pattern(word: str) -> str:
     return "".join(out)
 
 
+# Höjdnoter: centrumlinje (CL) och vattengång (VG) med en höjd - svensk standardnotation, inte ett rör.
+# Tecknet skrivs +, -, +- eller ± ("VG+-563": vattengång, tecknet enligt konsulten), eller inte alls.
+# Raden säger var röret ligger, aldrig att det finns ett rör till.
+HEIGHT_NOTE_RE = re.compile(r"^(CL|VG)\s*(\+-|-\+|±|\+|-|=)?\s*(\d+(?:[.,]\d+)?)$")
+
+
+def is_height_note(text: str) -> bool:
+    """CL eller VG följt av en höjd (`CL+2300`, `VG+-563`, `VG±828`, `VG-12`, `CL 4000`)."""
+    return HEIGHT_NOTE_RE.match(text.strip().upper().replace(" ", "")) is not None
+
+
 def is_code_like(word: str) -> bool:
     """Structural test: letters AND digits present, only code characters, starts with a letter or a count prefix.
 
@@ -93,6 +104,8 @@ def is_code_like(word: str) -> bool:
     a pattern that then outvotes the real labels."""
     if len(word) < 2 or len(word) > 24:
         return False
+    if is_height_note(word):
+        return False        # en höjdnot är aldrig en rörbeteckning
     if not re.fullmatch(r"[A-Za-zÅÄÖØ0-9\-/+.,:()\[\]]+", word):
         return False
     has_a = any(c.isalpha() for c in word)

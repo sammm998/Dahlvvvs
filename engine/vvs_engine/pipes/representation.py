@@ -460,6 +460,25 @@ def _box_of(prims: list[Prim]) -> tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+SMALL_CLOSED_FIGURES_ARE_NOT_PIPE = True
+SMALL_FIGURE_MAX_PT = 12.0      # pt: så stor får en sluten form vara och ändå vara en pilspets eller symbol
+CLOSE_TOL_PT = 0.5              # pt: formens första och sista punkt så nära = sluten
+
+
+def is_small_closed_figure(p) -> bool:
+    """En sluten väg (minst tre streck, början = slut) vars låda är högst SMALL_FIGURE_MAX_PT åt båda håll:
+    en pilspets i rörets ände, en ventil- eller brunnssymbol. Den är ritad med rörpennan men är ingen rörlängd."""
+    segs = [s for s in p.segs if s.length > 1e-6]
+    if len(segs) < 3:
+        return False
+    a, b = segs[0], segs[-1]
+    closed = getattr(p, "closed", False) or math.hypot(a.x0 - b.x1, a.y0 - b.y1) <= _R(
+        "pipes.representation.CLOSE_TOL_PT", CLOSE_TOL_PT)
+    x0, y0, x1, y1 = p.bbox
+    small = max(x1 - x0, y1 - y0) <= _R("pipes.representation.SMALL_FIGURE_MAX_PT", SMALL_FIGURE_MAX_PT)
+    return bool(closed and small)
+
+
 def collect_prims(page: RawPage, families: set[str], exclude_pids: set[str] | None = None,
                   figures_out: dict[str, list[Prim]] | None = None) -> dict[str, list[Prim]]:
     """Primitives of the given families. exclude_pids drops individual paths - the leader lines of the drawing,
@@ -482,6 +501,9 @@ def collect_prims(page: RawPage, families: set[str], exclude_pids: set[str] | No
         fk = family_key(p)
         if fk not in families:
             continue
+        if _R("pipes.representation.SMALL_CLOSED_FIGURES_ARE_NOT_PIPE", SMALL_CLOSED_FIGURES_ARE_NOT_PIPE) \
+                and is_small_closed_figure(p):
+            continue        # en pilspets eller symbol ritad med rörpennan: en sluten form är aldrig rörlängd
         for k, s in enumerate(p.segs):
             if s.length < 1e-6:
                 continue

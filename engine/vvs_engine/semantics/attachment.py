@@ -34,6 +34,8 @@ CONTACT_TOL = 0.6
 MARKER_MAX = 3.0          # pt: closed end markers (dots, small circles) of pipes
 DASH_GAP_MAX = 8.0        # pt: the widest drawn gap in a dashed run a leader end may land in
 NEAR_MISS = 6.0           # pt: how far short of its pipe a leader may stop and still be pointing at it
+NEAR_MISS_NEAREST = True  # flera saker inom räckhåll: ta den närmaste om ingen annan är nästan lika nära (h.1)
+NEAR_MISS_CONFIDENCE = 0.7   # ett rör som bara nås genom en sådan fångst (VS-Kalkyl SPEC 6.4.3 h.1)
 NEAR_ONE = 2.5            # pt: ...and how close the candidates must lie to each other to be one place
 EDGES_APART_MIN = 1.5     # pt: a pipe's two drawn edges never lie closer than the pen allows
 EDGES_APART_MAX = 8.0     # pt: ...nor further apart than a pipe's outer diameter is ever drawn
@@ -377,9 +379,19 @@ def _near_miss_hits(pt: tuple[float, float], gidx: "GeometryIndex", pipe_familie
             near.append((p, k, d, (sg.x0 + t * (sg.x1 - sg.x0), sg.y0 + t * (sg.y1 - sg.y0))))
     if not near:
         return []
+    one = _R("semantics.attachment.NEAR_ONE", NEAR_ONE)
+    if _R("semantics.attachment.NEAR_MISS_NEAREST", NEAR_MISS_NEAREST):
+        # VS-Kalkyl SPEC 6.4.3 h.1: närmaste röret inom räckhåll - om inget annat ligger nästan lika nära
+        nearest = min(near, key=lambda t: (t[2], t[0].pid, t[1]))
+        same = [t for t in near if math.hypot(t[3][0] - nearest[3][0], t[3][1] - nearest[3][1]) <= one]
+        others = [t for t in near if t not in same and t[0].pid != nearest[0].pid]   # samma ritade linje är ingen rival
+        ratio = _R("semantics.proximity.AMBIGUITY_RATIO", 1.5)
+        if any(t[2] <= ratio * max(nearest[2], 0.1) for t in others):
+            return []               # två saker nästan lika nära: ritningen har inte sagt vilken
+        return sorted(((p, k, d) for p, k, d, _ in same), key=lambda t: (t[0].pid, t[1]))
     for a in near:
         for b in near:
-            if math.hypot(a[3][0] - b[3][0], a[3][1] - b[3][1]) > _R("semantics.attachment.NEAR_ONE", NEAR_ONE):
+            if math.hypot(a[3][0] - b[3][0], a[3][1] - b[3][1]) > one:
                 return []                   # more than one drawn thing within reach: the sheet has not said which
     return sorted(((p, k, d) for p, k, d, _ in near), key=lambda t: (t[0].pid, t[1]))
 
@@ -1129,6 +1141,15 @@ def _bridge_spread(cs: list[Contact], paths: dict | None) -> int:
     return n if n >= 3 else 1
 
 
+def _captured(cs: list[Contact]) -> dict:
+    """En ledare som bara når sitt rör genom att fångas strax före det: konfidens NEAR_MISS_CONFIDENCE (h.1)."""
+    if not cs or any(c.kind != "near_miss" for c in cs):
+        return {}
+    return {"leader_end_captured": True,
+            "confidence": _R("semantics.attachment.NEAR_MISS_CONFIDENCE", NEAR_MISS_CONFIDENCE),
+            "capture_distance_mm": round(min(c.distance for c in cs) * 25.4 / 72.0, 2)}
+
+
 def resolve_block(block: AnnotationBlock, rows: list[Designation], ld: Leader, contacts: list[Contact],
                   system_tokens_in_drawing: set[str], spelled_out: frozenset[str] = frozenset(),
                   paths: dict | None = None, gidx: GeometryIndex | None = None) -> list[PipeCodeAnchor]:
@@ -1145,7 +1166,8 @@ def resolve_block(block: AnnotationBlock, rows: list[Designation], ld: Leader, c
                               designation_display=d.display_text, system_token=d.system_token,
                               dn=d.dn, multiplier=d.multiplier, block_id=block.bid, leader_id=ld.lid, leader_paths=ld.path_ids,
                               endpoint=ld.end, state=state, reason=reason, contacts=cs, candidate_families=gkeys,
-                              evidence={"n_rows": len(rows), "n_groups": len(gkeys), "leader_family": ld.family, "row_index": d.row_index, **(extra or {})})
+                              evidence={"n_rows": len(rows), "n_groups": len(gkeys), "leader_family": ld.family,
+                                        "row_index": d.row_index, **_captured(cs), **(extra or {})})
 
     if not gkeys:
         return [mk(d, "NO_PIPE_ATTACHMENT", "leader_endpoint_touches_no_pipe_geometry", []) for d in rows]

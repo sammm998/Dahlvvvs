@@ -110,6 +110,8 @@ class OwnershipResult:
     ambiguous_runs: list[dict]
     stats: dict[str, Any]
     riser_labels: dict[str, list[dict]] = field(default_factory=dict)   # identity key -> symbol-attached labels
+    outside_contract: list[dict] = field(default_factory=list)        # sträckor bortom en entreprenadgräns
+    boundaries_undecided: list[dict] = field(default_factory=list)    # gränser där sidan inte gick att avgöra
 
 
 def identity_of(a: PipeCodeAnchor, dn_token_index: int | None) -> Identity:
@@ -381,7 +383,8 @@ def _declared_by_join(g: PipeGraph, st: dict[int, "PrimState"], comp: list[int],
 def propagate(graphs: dict[str, PipeGraph], anchors: list[PipeCodeAnchor], page: int,
               identities: dict[str, Identity], spelled_out: frozenset[str] = frozenset(),
               declared=None, declared_max_pt: float | None = None,
-              end_evidence: dict[str, dict[int, dict]] | None = None) -> OwnershipResult:
+              end_evidence: dict[str, dict[int, dict]] | None = None,
+              boundaries: list | None = None) -> OwnershipResult:
     """identities: anchor_id -> Identity (only anchors that are verified AND belong to pipe-designation families).
     declared: the sheet's written rules for unlabelled pipes (semantics.declarations.DeclaredPipe), applied last
     and only to geometry every other reading left unowned.
@@ -409,9 +412,23 @@ def propagate(graphs: dict[str, PipeGraph], anchors: list[PipeCodeAnchor], page:
     for fk, g in graphs.items():
         _pair_unowned_runs(g, states[fk])
     given = _declare_unowned(graphs, states, list(declared), spelled_out, declared_max_pt) if declared else {}
+    if _R("pipes.ownership.PROPAGATE_TO_STOPS", PROPAGATE_TO_STOPS):
+        # efter bladets egna kopplingsledningsregler: de går före ett ärvt, osäkert namn
+        for fk, g in graphs.items():
+            _inherit_at_branches(g, states[fk])
+        ambiguous_runs = [r for r in ambiguous_runs
+                          if states[r["family"]].get(r["from_prim"]) is None
+                          or states[r["family"]][r["from_prim"]].state == "AMBIGUOUS"]
+    outside, undecided = _cut_at_boundaries(graphs, states, seeds, boundaries or [])
     pipes: list[PhysicalPipe] = []
     for fk, g in graphs.items():
         pipes.extend(_build_pipes(g, states[fk], fk, page))
+    for cut in outside:
+        # den del av den kapade rörbiten som ligger bortom gränsen hör inte till röret innanför
+        for p in pipes:
+            if p.family == cut["family"] and cut["cut_prim"] in p.prim_ids:
+                p.raw_length_pt = max(0.0, p.raw_length_pt - cut["cut_outside_pt"])
+                p.evidence = sorted({*p.evidence, BOUNDARY_CUT_REASON})
     pipes.sort(key=lambda p: p.physical_pipe_id)
     stats = Counter()
     for fk in graphs:
@@ -420,7 +437,96 @@ def propagate(graphs: dict[str, PipeGraph], anchors: list[PipeCodeAnchor], page:
     out = dict(stats)
     if given:
         out["declared_prims"] = sum(given.values())
-    return OwnershipResult(prim_states=states, pipes=pipes, ambiguous_runs=ambiguous_runs, stats=out)
+    return OwnershipResult(prim_states=states, pipes=pipes, ambiguous_runs=ambiguous_runs, stats=out,
+                           outside_contract=outside, boundaries_undecided=undecided)
+
+
+# ---------------------------------------------------------------- entreprenadgräns (semantics/boundary.py)
+#
+# En gränsnot pekar på en punkt på ett rör. Röret kapas där: allt som hänger ihop med punkten på den ena sidan
+# utan att passera den är den sidans. Den sida där ingen egen etikett sitter är utanför entreprenaden - om den
+# andra sidan har en. Sitter etiketter på båda sidor, eller på ingen, eller hänger sidorna ihop runt punkten,
+# avgörs inget och gränsen rapporteras. Det som är utanför får tillståndet OUTSIDE_CONTRACT: det räknas varken
+# som bekräftat eller som otilldelat.
+OUTSIDE_CONTRACT = "OUTSIDE_CONTRACT"
+OUTSIDE_REASON = "beyond_contract_boundary"
+BOUNDARY_CUT_REASON = "cut_at_contract_boundary"
+CONTRACT_BOUNDARIES = True
+DEAD_END_LABEL_KEEPS_DN = True
+DEAD_END_KEEPS_EVIDENCE = "dead_end_label_keeps_its_dn"
+
+
+def _side(g: PipeGraph, start_node: int, cut: int) -> tuple[set[int], set[int]]:
+    """Rörbitar och noder som nås från en nod utan att passera den kapade biten."""
+    prims: set[int] = set()
+    nodes = {start_node}
+    dq = deque([start_node])
+    while dq:
+        n = dq.popleft()
+        for q in g.nodes[n].prims:
+            if q == cut or q in prims:
+                continue
+            prims.add(q)
+            for m in g.prim_nodes[q]:
+                if m not in nodes:
+                    nodes.add(m)
+                    dq.append(m)
+    return prims, nodes
+
+
+def _cut_at_boundaries(graphs: dict[str, PipeGraph], states: dict[str, dict[int, PrimState]], seeds,
+                       boundaries: list) -> tuple[list[dict], list[dict]]:
+    outside: list[dict] = []
+    undecided: list[dict] = []
+    if not _R("pipes.ownership.CONTRACT_BOUNDARIES", CONTRACT_BOUNDARIES):
+        return outside, undecided
+    for b in boundaries:
+        if b.family is None or b.family not in graphs or b.prim_id not in graphs[b.family].prims:
+            undecided.append({"point": list(b.point), "note": b.note, "reason": "boundary_leader_reaches_no_pipe"})
+            continue
+        g, st, sd = graphs[b.family], states[b.family], seeds[b.family]
+        cut = g.prims[b.prim_id]
+        na, nb = g.prim_nodes[b.prim_id]
+        # vilken nod sitter i bitens början: noderna kan ha flyttats när grafen byggdes
+        a_first = (math.hypot(g.nodes[na].x - cut.seg.x0, g.nodes[na].y - cut.seg.y0)
+                   <= math.hypot(g.nodes[nb].x - cut.seg.x0, g.nodes[nb].y - cut.seg.y0))
+        start_node, end_node = (na, nb) if a_first else (nb, na)
+        _, t = point_seg_distance(b.point[0], b.point[1], cut.seg)
+        side_a, nodes_a = _side(g, start_node, b.prim_id)
+        side_b, nodes_b = _side(g, end_node, b.prim_id)
+        labelled_a = any(sd.get(p) for p in side_a) or any(
+            point_seg_distance(pt[0], pt[1], cut.seg)[1] < t for *_, pt in sd.get(b.prim_id, []))
+        labelled_b = any(sd.get(p) for p in side_b) or any(
+            point_seg_distance(pt[0], pt[1], cut.seg)[1] > t for *_, pt in sd.get(b.prim_id, []))
+        record = {"family": b.family, "point": [round(b.point[0], 2), round(b.point[1], 2)], "note": b.note,
+                  "note_bbox": [round(v, 2) for v in b.note_bbox], "cut_prim": b.prim_id}
+        if side_a & side_b or labelled_a == labelled_b:
+            why = ("the_run_joins_up_around_the_boundary" if side_a & side_b
+                   else "labels_on_both_sides" if labelled_a else "no_label_on_either_side")
+            undecided.append({**record, "reason": why})
+            continue
+        prims, nodes, frac = (side_a, nodes_a, t) if not labelled_a else (side_b, nodes_b, 1.0 - t)
+        idents = {st[p].identity for p in prims if st[p].identity is not None}
+        if st[b.prim_id].identity is not None:
+            idents.add(st[b.prim_id].identity)
+        ident = next(iter(idents)) if len(idents) == 1 else None
+        for p in prims:
+            prev = st[p]
+            st[p] = PrimState(state=OUTSIDE_CONTRACT, identity=prev.identity, reason=OUTSIDE_REASON,
+                              evidence=[OUTSIDE_REASON, *( [prev.reason] if prev.reason else [])])
+        gaps = 0.0
+        for br in g.bridges:
+            n = br.get("from_node")
+            if n in nodes and all(q in prims or q == b.prim_id for q in g.nodes[n].prims):
+                gaps += float(br.get("gap_pt") or 0.0)
+        cut_pt = frac * cut.seg.length
+        far = (cut.seg.x0, cut.seg.y0) if not labelled_a else (cut.seg.x1, cut.seg.y1)
+        cut_segment = [[round(b.point[0], 2), round(b.point[1], 2)], [round(far[0], 2), round(far[1], 2)]]
+        outside.append({**record, "prims": sorted(prims), "cut_outside_pt": cut_pt, "cut_segment": cut_segment,
+                        "length_pt": sum(g.prims[p].seg.length for p in prims) + gaps + cut_pt,
+                        "identity": ident.key if ident else None, "designation": ident.display if ident else None,
+                        "system": ident.system if ident else None, "dn": ident.dn if ident else None})
+    return outside, undecided
 
 
 # the two rules that carry an identity into geometry no label touched and no drawn boundary delimits
@@ -589,6 +695,147 @@ def _up_to_transition(g: PipeGraph, pids: list[int], from_end: bool, seeded_soli
 FLOW_LIMIT = 2.0
 
 
+# Så många oberoende slingor gör spridd geometri till ett nät (väggar, rutnät): där gäller längdbudgeten kvar.
+# En enda slinga kan vara en ledning som går runt och möter sig själv.
+FLOW_MESH_CYCLES = 2
+
+
+def _cycles(g: PipeGraph, prims) -> int:
+    """Oberoende slingor (E - V + C) bland rörbitarna, med dubbelritade bitar mellan samma nodpar räknade en gång."""
+    pairs = {tuple(sorted(g.prim_nodes[p])) for p in prims}
+    nodes = {n for pr in pairs for n in pr}
+    parent = {n: n for n in nodes}
+
+    def find(n: int) -> int:
+        while parent[n] != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    for a, b in pairs:
+        parent[find(a)] = find(b)
+    return len(pairs) - len(nodes) + len({find(n) for n in nodes})
+
+
+def _has_cycle(g: PipeGraph, comp: list[int]) -> bool:
+    """Är de här spridda rörbitarna ett nät snarare än ett träd av rör?"""
+    return _cycles(g, comp) >= _R("pipes.ownership.FLOW_MESH_CYCLES", FLOW_MESH_CYCLES)
+
+# VS-Kalkyl SPEC 6.4.3 h.3: en etikett gäller längs röret - raka fortsättningar och böjar - tills ny etikett,
+# symbol, dimensionsbytesmärke eller entreprenadgräns; ingen längdbudget. Vid en förgrening utan egen etikett ärver
+# grenen system och material, men dimensionen är osäker: grenen mäts, i granskningsnivån (konfidens 0,6), som ett
+# eget rör, och den märkta ledningen den grenar av påverkas inte. Av: flödesbudgeten och de äldre kraven på bevis i
+# grenens ände gäller som förut.
+PROPAGATE_TO_STOPS = True
+INHERITED_REASON = "unlabelled_branch_inherits_system_and_material"
+INHERITED_EVIDENCE = "dn_inherited_at_branch_uncertain"
+
+
+def _unnamed_meshes(g: PipeGraph, st: dict[int, PrimState]) -> set[int]:
+    """Rörbitar i onämnda sammanhängande delar som innehåller en slinga. Ett rörnät i plan är ett träd; ett nät av
+    väggar på samma penna, ett hölje, en ritad rektangel har slingor. Dit ärvs inget namn."""
+    unnamed = [p for p in g.prims if st[p].state != "CONFIRMED"]
+    parent: dict[int, int] = {}
+
+    def find(n: int) -> int:
+        parent.setdefault(n, n)
+        while parent[n] != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    for p in unnamed:
+        a, b = g.prim_nodes[p]
+        parent[find(a)] = find(b)
+    for br in g.bridges:
+        fa, fb = br.get("from_node"), br.get("to_node")
+        if fa in parent and fb in parent:
+            parent[find(fa)] = find(fb)
+    by_root: dict[int, list[int]] = defaultdict(list)
+    for p in unnamed:
+        by_root[find(g.prim_nodes[p][0])].append(p)
+    cyclic = {r for r, prims in by_root.items() if _cycles(g, prims) >= 1}
+    return {p for p in unnamed if find(g.prim_nodes[p][0]) in cyclic}
+
+
+def _inherit_at_branches(g: PipeGraph, st: dict[int, PrimState]) -> None:
+    """Grenar utan egen etikett ärver system och material; dimensionen markeras osäker (tentative).
+
+    - En gren som redan tagit korsningens enda identitet: namnet står, men dimensionen är en gissning.
+    - En gren som var tvetydig bara för att dess ände saknade bevis, eller mellan identiteter som delar system och
+      material och bara skiljer i dimension: den tar systemet och materialet, med den grövre dimensionen som osäker.
+      Skiljer sig system eller material är det en verklig konflikt och grenen förblir tvetydig.
+    - Onämnd geometri som möter ett namngivet rör i en förgrening ärver på samma sätt, gren för gren.
+    """
+    def inherit(pid: int, ident: Identity, why: str) -> None:
+        s = st[pid]
+        s.state, s.identity, s.reason, s.candidates = "CONFIRMED", ident, INHERITED_REASON, set()
+        s.tentative = True
+        s.evidence.extend([INHERITED_EVIDENCE, why])
+
+    for s in st.values():
+        if s.state == "CONFIRMED" and s.reason == "unlabeled_branch_takes_the_only_junction_identity" \
+                and not s.tentative:
+            s.tentative = True
+            s.evidence.append(INHERITED_EVIDENCE)
+    meshes = _unnamed_meshes(g, st)
+    ch0 = [c for c in graph_chains(g)]
+    chain0 = {p: i for i, c in enumerate(ch0) for p in c}
+
+    def leads_into_mesh(pid: int) -> bool:
+        # grenens kedja eller det den mynnar i har en slinga: ett nät, inte ett rör
+        chain = ch0[chain0[pid]]
+        if any(q in meshes for q in chain):
+            return True
+        ends = {n for q in chain for n in g.prim_nodes[q]}
+        return any(q in meshes for n in ends for q in g.nodes[n].prims)
+
+    for pid in sorted(st):
+        s = st[pid]
+        if s.state == "AMBIGUOUS" and s.reason in (NO_END_EVIDENCE, "AMBIGUOUS_BRANCH") and s.candidates \
+                and len({c.stem for c in s.candidates}) == 1 and not leads_into_mesh(pid):
+            inherit(pid, max(s.candidates, key=lambda c: (c.dn or 0, c.key)), f"was_{s.reason}")
+    ch = [c for c in graph_chains(g)]
+    chain_of = {p: i for i, c in enumerate(ch) for p in c}
+    # "Samma stråk byter dimension, den grövre fortsätter" gäller ett stråk med en böj. Där de två namngivna armarna
+    # ligger i linje med varandra och denna arm går av från dem är den en gren, och dess dimension en gissning.
+    for nid in sorted(g.nodes):
+        n = g.nodes[nid]
+        if n.degree < 3:
+            continue
+        for p in n.prims:
+            s = st[p]
+            if s.state != "CONFIRMED" or s.reason != "same_run_changes_size_the_coarser_carries_on" or s.tentative:
+                continue
+            others = [q for q in n.prims if q != p and st[q].state == "CONFIRMED"]
+            straight_past = any(angle_diff(g.prims[a].seg.angle, g.prims[b].seg.angle) <= 3.0
+                                for i, a in enumerate(others) for b in others[i + 1:])
+            in_line = any(angle_diff(g.prims[q].seg.angle, g.prims[p].seg.angle) <= 3.0 for q in others)
+            if straight_past and not in_line:
+                for q in ch[chain_of[p]]:
+                    if st[q].state == "CONFIRMED" and st[q].reason == s.reason and not st[q].tentative:
+                        st[q].tentative = True
+                        st[q].evidence.append(INHERITED_EVIDENCE)
+    changed = True
+    while changed:
+        changed = False
+        for nid in sorted(g.nodes):
+            n = g.nodes[nid]
+            if n.degree < 3:
+                continue
+            owners = {st[p].identity for p in n.prims if st[p].state == "CONFIRMED" and st[p].identity is not None}
+            if not owners or len({o.stem for o in owners}) != 1:
+                continue
+            ident = max(owners, key=lambda c: (c.dn or 0, c.key))
+            for p in sorted(n.prims):
+                if st[p].state != "UNOWNED" or p in meshes:
+                    continue
+                for q in ch[chain_of[p]]:
+                    if st[q].state == "UNOWNED":
+                        inherit(q, ident, f"unowned_branch_at_node_{nid}")
+                        changed = True
+
+
 def _bound_junction_flow(g: PipeGraph, st: dict[int, PrimState], fk: str, ambiguous_runs: list[dict]) -> None:
     """An identity may run on through a junction into geometry the drawing does not name - a straight run through
     a tee, an unnamed branch off a labelled one. On a pipe network that adds a little to what the labels say. On
@@ -601,6 +848,7 @@ def _bound_junction_flow(g: PipeGraph, st: dict[int, PrimState], fk: str, ambigu
     against its own labelled length: where its flowed length runs past twice what its labels delimit, that
     run's flow is not a reading and its geometry is AMBIGUOUS, and the run next to it is left alone.
     """
+    to_stops = _R("pipes.ownership.PROPAGATE_TO_STOPS", PROPAGATE_TO_STOPS)
     limit = _R("pipes.ownership.FLOW_LIMIT", FLOW_LIMIT)
     seen: set[int] = set()
     for start in sorted(st):
@@ -630,6 +878,8 @@ def _bound_junction_flow(g: PipeGraph, st: dict[int, PrimState], fk: str, ambigu
                   file=__import__("sys").stderr)
         if flowed <= limit * labelled:
             continue
+        if to_stops and not _has_cycle(g, [p for p in comp if st[p].reason in FLOWED_REASONS]):
+            continue    # spridningen bildar ett träd: ingen längdbudget; den stannar vid etikett, symbol eller gräns
         ident_key = s0.identity.key                 # read before the demotion below may blank the start prim
         caught: list[int] = []
         for pid in sorted(comp):
@@ -1560,6 +1810,14 @@ def _resolve_family(g: PipeGraph, st: dict[int, PrimState], seeds, ambiguous_run
                         reason = "junction_dn_completes_dn_less_label"
                     elif any(grp.strong for grp in groups_of.get(chain_of[v], [])):
                         reason = "through_junction_up_to_tick_boundary"
+                    elif (_R("pipes.ownership.DEAD_END_LABEL_KEEPS_DN", DEAD_END_LABEL_KEEPS_DN) and Y.dn is not None
+                          and info[v][1] and all(x == Y for grp in groups_of.get(chain_of[v], []) for x in grp.ids)):
+                        # beslut 2026-11-03: en etikett med dimension på en återvändsgren (eller symbolen i dess
+                        # ände), och ingen annan etikett på grenen, ger grenen etikettens dimension
+                        for p in todo:
+                            if DEAD_END_KEEPS_EVIDENCE not in st[p].evidence:
+                                st[p].evidence.append(DEAD_END_KEEPS_EVIDENCE)
+                        continue
                     else:
                         reason = "junction_dn_over_symbol_labels"
                     confirm(todo, merged if merged is not None else X, reason, src_aids)
