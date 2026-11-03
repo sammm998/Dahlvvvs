@@ -277,6 +277,19 @@ RULES: tuple[Rule, ...] = (
          "Har det ett namn spridits in i så här många oberoende slingor är det ett nät - väggar, ett rutnät - och "
          "längdbudgeten gäller där. En enda slinga kan vara en ledning som går runt och möter sig själv.",
          "antal", 2, 1, 10, None, True),
+    Rule("semantics.attachment.NEAR_MISS_NEAREST", G_LEADER, "Ledarände nära flera rör: ta det närmaste",
+         "En ledare som stannat strax före röret fångas av det närmaste röret inom räckhåll (2 × normal "
+         "tolerans), om inget annat ligger nästan lika nära (AMBIGUITY_RATIO). Av: då fångas den bara när en "
+         "enda sak ligger inom räckhåll.",
+         "", True, None, None, None, True),
+    Rule("semantics.attachment.NEAR_MISS_CONFIDENCE", G_LEADER, "Konfidens för en fångad ledarände",
+         "Ett rör som bara får sitt namn genom en ledare som stannat före det (VS-Kalkyl SPEC 6.4.3 h.1).",
+         "andel", 0.7, 0.0, 1.0, None, True),
+    Rule("output.artifacts.LEADERS_MEET_MIN", G_LEADER, "Etiketter vars ledare möts utan rör",
+         "Så många etiketter vars ledare slutar i samma punkt där inget rör finns rapporteras, med punkten - "
+         "en gemensam ledare från ett staplat block eller flera ledare som möts. Där pekar ritningen på något "
+         "läsningen inte ser som rör (en stigare, ett schakt).",
+         "antal", 3, 2, 20, None, True),
     Rule("semantics.proximity.LEADERLESS_MM", G_LABEL, "Etikett utan ledare: hur nära röret",
          "En rörbeteckning utan ledare tillhör det närmaste rör som löper parallellt med texten, om det ligger "
          "så här nära på papperet (VS-Kalkyl SPEC 6.4.3 h.2).",

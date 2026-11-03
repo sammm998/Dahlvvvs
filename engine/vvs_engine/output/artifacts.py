@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import json
 import os
 import platform
@@ -17,6 +18,49 @@ from ..pipeline import reading_coverage
 from ..measure.measure import SETTLED_SCALE
 from ..semantics.leaders import leader_family_report
 from ..pipes.confidence import tier
+from ..rules import value as _rule
+
+LEADERS_MEET_MIN = 3        # så många etiketter vars ledare slutar i en punkt utan rör rapporteras med punkten
+LEADERS_MEET_RADIUS = 2.5   # pt: ...inom så här nära varandra är det en punkt (samma som NEAR_ONE)
+
+
+def leaders_meeting_without_pipe(anchors) -> list[dict]:
+    """Punkter där flera etiketters ledare slutar utan att något rör finns där (VS-Kalkyl SPEC 6.4.3 h.1).
+
+    En ensam etikett som missar sitt rör är ett läsfel; flera som pekar på samma punkt - genom en gemensam ledare
+    från ett staplat block eller genom ledare som möts - pekar på något ritningen visar men läsningen inte ser
+    som rör: en stigare, ett schakt, en symbol. Punkten rapporteras med koordinater, etiketterna och antalet ledare.
+    """
+    ends: dict[str, tuple[float, float]] = {}
+    texts: dict[str, list[str]] = {}
+    for a in anchors:
+        if a.state != "NO_PIPE_ATTACHMENT":
+            continue
+        ends.setdefault(a.leader_id, (a.endpoint[0], a.endpoint[1]))
+        texts.setdefault(a.leader_id, []).append(a.designation)
+    radius = _rule("semantics.attachment.NEAR_ONE", LEADERS_MEET_RADIUS)
+    clusters: list[list[str]] = []
+    for lid in sorted(ends):
+        x, y = ends[lid]
+        home = next((c for c in clusters if any(math.hypot(ends[o][0] - x, ends[o][1] - y) <= radius for o in c)),
+                    None)
+        if home is None:
+            clusters.append([lid])
+        else:
+            home.append(lid)
+    least = int(_rule("output.artifacts.LEADERS_MEET_MIN", LEADERS_MEET_MIN))
+    out = []
+    for c in clusters:
+        labels = sorted(t for o in c for t in texts[o])
+        if len(labels) < least:
+            continue
+        cx = sum(ends[o][0] for o in c) / len(c)
+        cy = sum(ends[o][1] for o in c) / len(c)
+        out.append({"kind": "leaders_meet_without_pipe", "point": [round(cx, 2), round(cy, 2)],
+                    "n_labels": len(labels), "n_leaders": len(c), "texts": labels,
+                    "reason": "flera etiketters ledare slutar i samma punkt utan rör",
+                    "bbox": [cx - 5, cy - 5, cx + 5, cy + 5], "id": "meet:" + ",".join(sorted(c))})
+    return out
 
 
 def _from_image(pa) -> bool:
@@ -306,6 +350,7 @@ def unresolved_issues(pa) -> list[dict]:
             issues.append({"kind": "ambiguous_pipe_attachment", "text": a.designation, "reason": a.reason, "bbox": [a.endpoint[0] - 5, a.endpoint[1] - 5, a.endpoint[0] + 5, a.endpoint[1] + 5], "id": a.anchor_id})
         elif a.state == "NO_PIPE_ATTACHMENT":
             issues.append({"kind": "missing_pipe_attachment", "text": a.designation, "reason": a.reason, "bbox": [a.endpoint[0] - 5, a.endpoint[1] - 5, a.endpoint[0] + 5, a.endpoint[1] + 5], "id": a.anchor_id})
+    issues.extend(leaders_meeting_without_pipe(pa.anchors))
     for r in pa.ownership.ambiguous_runs:
         # An unresolved case is the least important thing in a reading and must never cost the reading itself.
         # A record naming a family or a primitive this graph does not hold is a defect worth seeing, not a
