@@ -82,3 +82,67 @@ def test_the_file_is_read_per_page_and_hashed(tmp_path):
     assert labels.by_page[2][0].uncertain and not labels.by_page[1][0].uncertain
     assert len(labels.sha256) == 64 and labels.meta["model"] == "claude-sonnet-5-5"
     assert sorted(labels.without([2]).by_page) == [1]
+
+
+class _Seg:
+    def __init__(self, x0, y0, x1, y1):
+        self.x0, self.y0, self.x1, self.y1 = x0, y0, x1, y1
+
+
+class _Path:
+    def __init__(self, segs):
+        self.segs = segs
+
+
+class _Page:
+    def __init__(self, paths):
+        self.paths, self.spans = paths, []
+
+
+def test_a_loose_box_is_drawn_in_to_the_ink_and_a_pipe_through_it_stays_a_pipe():
+    from vvs_engine.text.external_labels import Ink
+    glyphs = _Path([_Seg(102.0 + 5 * i, 201.0, 105.0 + 5 * i, 207.0) for i in range(6)])   # tecknen
+    pipe = _Path([_Seg(50.0, 209.0, 300.0, 209.0)])                                       # röret under
+    ink = Ink.of(_Page([glyphs, pipe]))
+    loose = ExternalLabel("KV01-K1", (96.0, 196.0, 140.0, 212.0), 0.98)                   # för stor låda
+    [ln], rep = apply_external_labels([], [loose], 1, ink)
+    assert ln.bbox[3] <= 207.0 + 1e-6 and ln.bbox[1] >= 201.0 - 1e-6                     # röret ligger utanför
+    assert ln.bbox[0] >= 102.0 - 1e-6 and ln.bbox[2] <= 130.0 + 1e-6
+    assert rep.added == 1 and rep.no_ink == 0
+
+
+def test_a_label_with_no_ink_and_no_engine_line_is_not_used():
+    from vvs_engine.text.external_labels import Ink
+    ink = Ink.of(_Page([_Path([_Seg(0.0, 0.0, 400.0, 0.0)])]))
+    lines, rep = apply_external_labels([], [ExternalLabel("X", (100.0, 100.0, 110.0, 110.0), 0.98)], 1, ink)
+    assert lines == [] and rep.no_ink == 1
+
+
+def test_a_fragment_and_a_duplicate_at_the_same_place_give_one_line():
+    whole = ExternalLabel("S01-P2-110", (100.0, 100.0, 160.0, 110.0), 0.75, ("needs_review",))
+    part = ExternalLabel("S01-P2", (100.0, 100.0, 136.0, 110.0), 0.98)
+    twin = ExternalLabel("S01-P2-110", (101.0, 100.5, 160.5, 110.0), 0.98)
+    lines, rep = apply_external_labels([], [part, whole, twin], 1)
+    assert [ln.text for ln in lines] == ["S01-P2-110"] and rep.uncertain == 0   # den säkrare av tvillingarna
+
+
+def test_a_separator_is_not_text():
+    lines, rep = apply_external_labels([], [ExternalLabel("=", (85.0, 123.0, 90.0, 129.0), 0.98),
+                                            ExternalLabel("K1", (56.0, 121.0, 65.0, 130.0), 0.98)], 1)
+    assert [ln.text for ln in lines] == ["K1"] and rep.symbols == 1
+
+
+def test_the_underline_inside_a_loose_box_is_not_taken_as_ink():
+    from vvs_engine.text.external_labels import Ink
+    glyphs = _Path([_Seg(102.0 + 5 * i, 201.0, 105.0 + 5 * i, 207.0) for i in range(8)])
+    underline = _Path([_Seg(101.0, 209.0, 142.0, 209.0)])                                  # inne i lådan
+    ink = Ink.of(_Page([glyphs, underline]))
+    [ln], _ = apply_external_labels([], [ExternalLabel("KV01-K1-", (96.0, 196.0, 146.0, 212.0), 0.98)], 1, ink)
+    assert ln.bbox[3] <= 207.0 + 1e-6            # raden slutar ovanför sin understrykning
+
+
+def test_an_engine_line_with_the_same_text_is_left_as_it_is():
+    engine = _row("S02-P2-110", 100.0, 200.0)
+    same = ExternalLabel("S02-P2-110", (97.0, 197.0, 160.0, 212.0), 0.75, ("needs_review",))
+    [ln], rep = apply_external_labels([engine], [same], 1)
+    assert ln is engine and rep.unchanged == 1 and ln.rid in rep.uncertain_rids

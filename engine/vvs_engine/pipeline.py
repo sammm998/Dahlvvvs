@@ -1047,7 +1047,7 @@ def prepare_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     label_report = None
     if external_labels is not None:
         # Etiketter som en annan läsare redan läst tecken för tecken: texten byts, motorns geometri behålls.
-        lines, label_report = external_labels.apply(lines, page.info.index)
+        lines, label_report = external_labels.apply(lines, page.info.index, page)
         if film:
             film.note("READING_DESIGNATIONS",
                       f"Etikettfilen: {label_report.labels} etiketter, {label_report.changed} rader fick ny text, "
