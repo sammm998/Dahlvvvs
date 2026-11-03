@@ -648,6 +648,8 @@ def _repair_clipped_words(page: RawPage, blocks: list[AnnotationBlock], word_cac
     repaired = 0
     for b in blocks:
         for ri, br in enumerate(b.rows):
+            if br.line.protected:
+                continue            # en säker extern läsning kompletteras inte heller
             gws = _words(br.line)
             parts = br.text_norm.split(" ") if br.text_norm else []
             if len(parts) != len(gws):
@@ -697,10 +699,16 @@ def extract_designations(page: RawPage, blocks: list[AnnotationBlock]) -> tuple[
     grammar = DesignationGrammar()
     # pass 1: observe all code-like word readings (drawing-local structure)
     word_cache: dict[tuple[str, int, int], list] = {}
+    full: dict[tuple[str, int, int], list] = {}       # skyddade ord: alla läsningar, för att se vad som avstods
+    kept_against_grammar: dict[tuple[str, int], str] = {}
     for b in blocks:
         for ri, br in enumerate(b.rows):
             for wi, w in enumerate(_words(br.line)):
                 rd = word_readings(w)
+                if br.line.protected:
+                    # en säker extern läsning skrivs aldrig om: bara läsningen som den står
+                    full[(b.bid, ri, wi)] = rd
+                    rd = [r for r in rd if r.flips == 0][:1] or rd[:1]
                 word_cache[(b.bid, ri, wi)] = (w, rd)
                 if any(is_code_like(r.text) for r in rd):
                     grammar.observe(rd)
@@ -712,6 +720,11 @@ def extract_designations(page: RawPage, blocks: list[AnnotationBlock]) -> tuple[
             for wi, _ in enumerate(_words(br.line)):
                 w, rd = word_cache[(b.bid, ri, wi)]
                 best = grammar.choose(rd)
+                if (b.bid, ri, wi) in full:
+                    would = grammar.choose(full[(b.bid, ri, wi)])
+                    if would.text != best.text:
+                        # bladets mönster hade velat läsa ordet annorlunda; den externa läsningen står, och det flaggas
+                        kept_against_grammar[(b.bid, ri)] = would.text
                 parts.append(best.text)
                 if is_code_like(best.text):
                     chosen_words.append(best.text)
@@ -751,7 +764,11 @@ def extract_designations(page: RawPage, blocks: list[AnnotationBlock]) -> tuple[
                     angle=br.line.angle,
                     layer=br.line.layer, source=br.line.source, glyph_scores=[g.score for g in gl], unknown_chars=sum(1 for g in gl if g.char == "?"),
                     evidence={"pattern_count": fam.count if fam else 0, "underlined": bool(br.underline),
-                              "block_rows": len(b.rows), "frame_layers": dict(b.frame_layers), "word_index": wi},
+                              "block_rows": len(b.rows), "frame_layers": dict(b.frame_layers), "word_index": wi,
+                              **({"external_text_kept": True,
+                                  "grammar_would_read": kept_against_grammar[(b.bid, ri)]}
+                                 if (b.bid, ri) in kept_against_grammar else {}),
+                              **({"external_protected": True} if br.line.protected else {})},
                     family=f"grammar:{pat}"))
                 stats["designations"] += 1
     designations.sort(key=lambda d: d.did)

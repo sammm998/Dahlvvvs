@@ -53,6 +53,9 @@ class TextRow:
     family: str = ""               # text/glyph family id
     provenance: list[str] = field(default_factory=list)   # path ids / span ids
     unknown_chars: int = 0
+    # text en extern läsare läst med konfidens över sin tröskel (text/external_labels.py): grammatiken får inte
+    # skriva om den – inga tvillingbyten (2/Z, 0/O …), ingen komplettering av avskurna ord
+    protected: bool = False
 
     @property
     def cx(self) -> float:

@@ -281,6 +281,10 @@ def unresolved_issues(pa) -> list[dict]:
     for d in pa.designations:
         if d.unknown_chars:
             issues.append({"kind": "uncertain_designation", "text": d.text, "bbox": list(d.bbox), "id": d.did})
+        if (d.evidence or {}).get("external_text_kept"):
+            # en säker extern läsning som bladets mönster ville läsa annorlunda: texten står, granskaren får se
+            issues.append({"kind": "external_label_against_grammar", "text": d.text, "bbox": list(d.bbox),
+                           "id": d.did, "grammar_would_read": d.evidence.get("grammar_would_read")})
         elif d.dn is None and _could_be_a_pipe_label(d):
             issues.append({"kind": "missing_dn", "text": d.text, "bbox": list(d.bbox), "id": d.did})
     with_leader = {a.designation_id for a in pa.anchors}

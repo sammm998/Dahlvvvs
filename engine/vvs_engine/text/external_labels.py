@@ -53,10 +53,11 @@ class ExternalLabel:
     confidence: float
     flags: tuple[str, ...] = ()
     method: str = ""
+    min_confidence: float = MIN_CONFIDENCE    # läsarens egen tröskel (etikettfilens _meta.min_read_confidence)
 
     @property
     def uncertain(self) -> bool:
-        return self.confidence < MIN_CONFIDENCE or "needs_review" in self.flags
+        return self.confidence < self.min_confidence or "needs_review" in self.flags
 
 
 @dataclass
@@ -97,6 +98,7 @@ class ExternalLabels:
         if not isinstance(data, dict):
             raise ValueError(f"{path}: etikettfilen ska vara ett objekt per sidindex")
         by_page: dict[int, list[ExternalLabel]] = {}
+        threshold = float((data.get("_meta") or {}).get("min_read_confidence") or MIN_CONFIDENCE)
         for key, sheet in data.items():
             if key.startswith("_"):
                 continue
@@ -111,7 +113,7 @@ class ExternalLabels:
                     continue
                 labels.append(ExternalLabel(text, (float(box[0]), float(box[1]), float(box[2]), float(box[3])),
                                             float(r.get("read_confidence", 0.0)), tuple(r.get("flags") or ()),
-                                            str(r.get("method") or "")))
+                                            str(r.get("method") or ""), threshold))
             by_page[int(key)] = labels
         meta = data.get("_meta") or {}
         return cls(by_page, hashlib.sha256(raw).hexdigest(), {k: meta.get(k) for k in ("models", "model", "ocr")})
@@ -215,7 +217,8 @@ def _line_for(label: ExternalLabel, mine: list[TextRow], page: int, default_sour
     rid = stable_id("xl", page, label.text, *[round(v, 1) for v in label.bbox])
     return TextRow(rid=rid, page=page, text=label.text, glyphs=glyphs,
                    bbox=bbox_union([g.bbox for g in glyphs]), angle=angle, height=height, source=source,
-                   layer=layer, font=font, family="external", provenance=prov, unknown_chars=0)
+                   layer=layer, font=font, family="external", provenance=prov, unknown_chars=0,
+                   protected=not label.uncertain)
 
 
 def _one_per_place(labels: list[ExternalLabel]) -> list[ExternalLabel]:
@@ -269,7 +272,10 @@ def apply_external_labels(lines: list[TextRow], labels: list[ExternalLabel], pag
     for j, lb in enumerate(labels):
         mine = taken.get(j, [])
         if mine and _norm(" ".join(r.text for r in mine)) == _norm(lb.text):
-            # motorn läste redan samma text: dess rad står kvar orörd, med sin egen geometri
+            # motorn läste redan samma text: dess rad står kvar orörd, med sin egen geometri - men en säker
+            # extern läsning av samma text skyddar den mot grammatikens omläsning
+            for r in mine:
+                r.protected = not lb.uncertain
             out.extend(mine)
             report.unchanged += 1
             if lb.uncertain:
