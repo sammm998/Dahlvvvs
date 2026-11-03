@@ -356,7 +356,13 @@ def main(argv=None):
             rid, _, raw = item.partition("=")
             if rid not in _rules.BY_ID or not _rules.BY_ID[rid].tunable:
                 ap.error(f"--rule {rid}: ingen inställbar regel med det id:t")
-            overrides[rid] = type(_rules.BY_ID[rid].default)(raw)
+            default = _rules.BY_ID[rid].default
+            if isinstance(default, bool):
+                if raw.strip().lower() not in ("true", "false", "1", "0", "on", "off"):
+                    ap.error(f"--rule {rid}: {raw!r} är inget sant/falskt-värde")
+                overrides[rid] = raw.strip().lower() in ("true", "1", "on")
+            else:
+                overrides[rid] = type(default)(raw)
         with _rules.using(overrides):
             s = analyze_pdf(args.pdf, args.out, args.name, not args.no_determinism, not args.no_contamination,
                             progress=lambda st: print(f"[{st}]", file=sys.stderr), external_labels=labels,

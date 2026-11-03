@@ -239,8 +239,12 @@ def test_an_unlabeled_branch_takes_the_only_junction_identity_only_with_evidence
         shape.commit(); doc.save(path); doc.close()
         return analyze_page(extract_document(path).pages[0])
 
-    # ends in empty air: the main run is whole and confirmed, the branch is a question with one candidate
-    pa = build("S3-R8-110")
+    # ends in empty air. With the rule off: the main run is whole and confirmed, the branch is a question with one
+    # candidate. With it on (VS-Kalkyl SPEC 6.4.3 h.3): the branch inherits system and material with an uncertain
+    # size - its own pipe, to review - and the main run is untouched.
+    from vvs_engine.rules import using
+    with using({"pipes.ownership.PROPAGATE_TO_STOPS": False}):
+        pa = build("S3-R8-110")
     reasons = {st.reason for sts in pa.ownership.prim_states.values() for st in sts.values()}
     assert "UNLABELLED_BRANCH_WITHOUT_END_EVIDENCE" in reasons and "unlabeled_branch_takes_the_only_junction_identity" not in reasons
     q = {(r["base"], r["dn"]): r for r in pa.quantities}
@@ -250,6 +254,10 @@ def test_an_unlabeled_branch_takes_the_only_junction_identity_only_with_evidence
     assert abs(sum(r["ambiguous_m"] for r in pa.quantities) - 144 / 56.69) < 0.4
     assert len([p for p in pa.ownership.pipes if p.identity.dn == 110]) == 1, "the main run stays one pipe through the tee"
     assert any(f["reason"] == "AMBIGUOUS_JUNCTION" and abs(f["x"] - 400) < 4 for f in pa.frontiers)   # noden sitter vid dashens ände, tre punkter från T:t
+    pa = build("S3-R8-110")
+    assert sum(r["ambiguous_m"] for r in pa.quantities) == 0
+    assert sum(r.get("review_m", 0.0) for r in pa.quantities) > 0, "the branch is measured, to review"
+    assert len([p for p in pa.ownership.pipes if p.identity.dn == 110 and not p.needs_review]) == 1
 
     # ends in a component: the branch is a pipe, and it takes the only name the junction offers
     pa = build("S3-R8-110", fixture=True)

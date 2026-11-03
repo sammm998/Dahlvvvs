@@ -76,11 +76,13 @@ def test_the_same_figure_in_another_drawing_order_gives_the_same_takeoff(tmp_pat
 
 
 def test_the_connector_does_not_become_one_of_the_two_sizes(tmp_path):
-    """Förbindelsen är 200 punkter, 3,53 m i 1:50. Den får inte ligga i någon av de två raderna."""
+    """Förbindelsen är 200 punkter, 3,53 m i 1:50. Den får aldrig bli *säkert* en av de två dimensionerna.
+    VS-Kalkyl SPEC 6.4.3 h.3: en gren utan egen etikett ärver system och material med osäker dimension - den mäts
+    i granskningsnivån, inte som säker."""
     rows, pa = _read(_sheet(str(tmp_path / "c.pdf"), "vanster-forst"))
-    # varje stråk är 200 punkter = 3,53 m; en rad som fått förbindelsen har ungefär det dubbla
-    for des, m in rows.items():
-        assert m < 5.0, f"{des} fick {m} m - förbindelsen har lagts till en dimension ritningen inte pekar ut"
+    for q in pa.quantities:
+        sure = q["confirmed_horizontal_m"] - q.get("review_m", 0.0)
+        assert sure < 5.0, f"{q['designation']} fick {sure} m säkert - förbindelsen tillhör ingen dimension säkert"
 
 
 def test_what_the_drawing_does_not_say_is_reported_as_ambiguous(tmp_path):
@@ -88,5 +90,6 @@ def test_what_the_drawing_does_not_say_is_reported_as_ambiguous(tmp_path):
     from vvs_engine.pipeline import reading_coverage
     _, pa = _read(_sheet(str(tmp_path / "d.pdf"), "vanster-forst"))
     c = reading_coverage(pa)
-    assert (c["ambiguous_m"] or 0) + (c["unowned_m"] or 0) > 1.0, (
-        "det ritningen inte avgör ska redovisas, inte gissas")
+    review = sum(q.get("review_m", 0.0) for q in pa.quantities)
+    assert (c["ambiguous_m"] or 0) + (c["unowned_m"] or 0) + review > 1.0, (
+        "det ritningen inte avgör ska redovisas - som fråga eller att granska - inte gissas")

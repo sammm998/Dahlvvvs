@@ -409,6 +409,13 @@ def propagate(graphs: dict[str, PipeGraph], anchors: list[PipeCodeAnchor], page:
     for fk, g in graphs.items():
         _pair_unowned_runs(g, states[fk])
     given = _declare_unowned(graphs, states, list(declared), spelled_out, declared_max_pt) if declared else {}
+    if _R("pipes.ownership.PROPAGATE_TO_STOPS", PROPAGATE_TO_STOPS):
+        # efter bladets egna kopplingsledningsregler: de går före ett ärvt, osäkert namn
+        for fk, g in graphs.items():
+            _inherit_at_branches(g, states[fk])
+        ambiguous_runs = [r for r in ambiguous_runs
+                          if states[r["family"]].get(r["from_prim"]) is None
+                          or states[r["family"]][r["from_prim"]].state == "AMBIGUOUS"]
     pipes: list[PhysicalPipe] = []
     for fk, g in graphs.items():
         pipes.extend(_build_pipes(g, states[fk], fk, page))
@@ -589,6 +596,147 @@ def _up_to_transition(g: PipeGraph, pids: list[int], from_end: bool, seeded_soli
 FLOW_LIMIT = 2.0
 
 
+# Så många oberoende slingor gör spridd geometri till ett nät (väggar, rutnät): där gäller längdbudgeten kvar.
+# En enda slinga kan vara en ledning som går runt och möter sig själv.
+FLOW_MESH_CYCLES = 2
+
+
+def _cycles(g: PipeGraph, prims) -> int:
+    """Oberoende slingor (E - V + C) bland rörbitarna, med dubbelritade bitar mellan samma nodpar räknade en gång."""
+    pairs = {tuple(sorted(g.prim_nodes[p])) for p in prims}
+    nodes = {n for pr in pairs for n in pr}
+    parent = {n: n for n in nodes}
+
+    def find(n: int) -> int:
+        while parent[n] != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    for a, b in pairs:
+        parent[find(a)] = find(b)
+    return len(pairs) - len(nodes) + len({find(n) for n in nodes})
+
+
+def _has_cycle(g: PipeGraph, comp: list[int]) -> bool:
+    """Är de här spridda rörbitarna ett nät snarare än ett träd av rör?"""
+    return _cycles(g, comp) >= _R("pipes.ownership.FLOW_MESH_CYCLES", FLOW_MESH_CYCLES)
+
+# VS-Kalkyl SPEC 6.4.3 h.3: en etikett gäller längs röret - raka fortsättningar och böjar - tills ny etikett,
+# symbol, dimensionsbytesmärke eller entreprenadgräns; ingen längdbudget. Vid en förgrening utan egen etikett ärver
+# grenen system och material, men dimensionen är osäker: grenen mäts, i granskningsnivån (konfidens 0,6), som ett
+# eget rör, och den märkta ledningen den grenar av påverkas inte. Av: flödesbudgeten och de äldre kraven på bevis i
+# grenens ände gäller som förut.
+PROPAGATE_TO_STOPS = True
+INHERITED_REASON = "unlabelled_branch_inherits_system_and_material"
+INHERITED_EVIDENCE = "dn_inherited_at_branch_uncertain"
+
+
+def _unnamed_meshes(g: PipeGraph, st: dict[int, PrimState]) -> set[int]:
+    """Rörbitar i onämnda sammanhängande delar som innehåller en slinga. Ett rörnät i plan är ett träd; ett nät av
+    väggar på samma penna, ett hölje, en ritad rektangel har slingor. Dit ärvs inget namn."""
+    unnamed = [p for p in g.prims if st[p].state != "CONFIRMED"]
+    parent: dict[int, int] = {}
+
+    def find(n: int) -> int:
+        parent.setdefault(n, n)
+        while parent[n] != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    for p in unnamed:
+        a, b = g.prim_nodes[p]
+        parent[find(a)] = find(b)
+    for br in g.bridges:
+        fa, fb = br.get("from_node"), br.get("to_node")
+        if fa in parent and fb in parent:
+            parent[find(fa)] = find(fb)
+    by_root: dict[int, list[int]] = defaultdict(list)
+    for p in unnamed:
+        by_root[find(g.prim_nodes[p][0])].append(p)
+    cyclic = {r for r, prims in by_root.items() if _cycles(g, prims) >= 1}
+    return {p for p in unnamed if find(g.prim_nodes[p][0]) in cyclic}
+
+
+def _inherit_at_branches(g: PipeGraph, st: dict[int, PrimState]) -> None:
+    """Grenar utan egen etikett ärver system och material; dimensionen markeras osäker (tentative).
+
+    - En gren som redan tagit korsningens enda identitet: namnet står, men dimensionen är en gissning.
+    - En gren som var tvetydig bara för att dess ände saknade bevis, eller mellan identiteter som delar system och
+      material och bara skiljer i dimension: den tar systemet och materialet, med den grövre dimensionen som osäker.
+      Skiljer sig system eller material är det en verklig konflikt och grenen förblir tvetydig.
+    - Onämnd geometri som möter ett namngivet rör i en förgrening ärver på samma sätt, gren för gren.
+    """
+    def inherit(pid: int, ident: Identity, why: str) -> None:
+        s = st[pid]
+        s.state, s.identity, s.reason, s.candidates = "CONFIRMED", ident, INHERITED_REASON, set()
+        s.tentative = True
+        s.evidence.extend([INHERITED_EVIDENCE, why])
+
+    for s in st.values():
+        if s.state == "CONFIRMED" and s.reason == "unlabeled_branch_takes_the_only_junction_identity" \
+                and not s.tentative:
+            s.tentative = True
+            s.evidence.append(INHERITED_EVIDENCE)
+    meshes = _unnamed_meshes(g, st)
+    ch0 = [c for c in graph_chains(g)]
+    chain0 = {p: i for i, c in enumerate(ch0) for p in c}
+
+    def leads_into_mesh(pid: int) -> bool:
+        # grenens kedja eller det den mynnar i har en slinga: ett nät, inte ett rör
+        chain = ch0[chain0[pid]]
+        if any(q in meshes for q in chain):
+            return True
+        ends = {n for q in chain for n in g.prim_nodes[q]}
+        return any(q in meshes for n in ends for q in g.nodes[n].prims)
+
+    for pid in sorted(st):
+        s = st[pid]
+        if s.state == "AMBIGUOUS" and s.reason in (NO_END_EVIDENCE, "AMBIGUOUS_BRANCH") and s.candidates \
+                and len({c.stem for c in s.candidates}) == 1 and not leads_into_mesh(pid):
+            inherit(pid, max(s.candidates, key=lambda c: (c.dn or 0, c.key)), f"was_{s.reason}")
+    ch = [c for c in graph_chains(g)]
+    chain_of = {p: i for i, c in enumerate(ch) for p in c}
+    # "Samma stråk byter dimension, den grövre fortsätter" gäller ett stråk med en böj. Där de två namngivna armarna
+    # ligger i linje med varandra och denna arm går av från dem är den en gren, och dess dimension en gissning.
+    for nid in sorted(g.nodes):
+        n = g.nodes[nid]
+        if n.degree < 3:
+            continue
+        for p in n.prims:
+            s = st[p]
+            if s.state != "CONFIRMED" or s.reason != "same_run_changes_size_the_coarser_carries_on" or s.tentative:
+                continue
+            others = [q for q in n.prims if q != p and st[q].state == "CONFIRMED"]
+            straight_past = any(angle_diff(g.prims[a].seg.angle, g.prims[b].seg.angle) <= 3.0
+                                for i, a in enumerate(others) for b in others[i + 1:])
+            in_line = any(angle_diff(g.prims[q].seg.angle, g.prims[p].seg.angle) <= 3.0 for q in others)
+            if straight_past and not in_line:
+                for q in ch[chain_of[p]]:
+                    if st[q].state == "CONFIRMED" and st[q].reason == s.reason and not st[q].tentative:
+                        st[q].tentative = True
+                        st[q].evidence.append(INHERITED_EVIDENCE)
+    changed = True
+    while changed:
+        changed = False
+        for nid in sorted(g.nodes):
+            n = g.nodes[nid]
+            if n.degree < 3:
+                continue
+            owners = {st[p].identity for p in n.prims if st[p].state == "CONFIRMED" and st[p].identity is not None}
+            if not owners or len({o.stem for o in owners}) != 1:
+                continue
+            ident = max(owners, key=lambda c: (c.dn or 0, c.key))
+            for p in sorted(n.prims):
+                if st[p].state != "UNOWNED" or p in meshes:
+                    continue
+                for q in ch[chain_of[p]]:
+                    if st[q].state == "UNOWNED":
+                        inherit(q, ident, f"unowned_branch_at_node_{nid}")
+                        changed = True
+
+
 def _bound_junction_flow(g: PipeGraph, st: dict[int, PrimState], fk: str, ambiguous_runs: list[dict]) -> None:
     """An identity may run on through a junction into geometry the drawing does not name - a straight run through
     a tee, an unnamed branch off a labelled one. On a pipe network that adds a little to what the labels say. On
@@ -601,6 +749,7 @@ def _bound_junction_flow(g: PipeGraph, st: dict[int, PrimState], fk: str, ambigu
     against its own labelled length: where its flowed length runs past twice what its labels delimit, that
     run's flow is not a reading and its geometry is AMBIGUOUS, and the run next to it is left alone.
     """
+    to_stops = _R("pipes.ownership.PROPAGATE_TO_STOPS", PROPAGATE_TO_STOPS)
     limit = _R("pipes.ownership.FLOW_LIMIT", FLOW_LIMIT)
     seen: set[int] = set()
     for start in sorted(st):
@@ -630,6 +779,8 @@ def _bound_junction_flow(g: PipeGraph, st: dict[int, PrimState], fk: str, ambigu
                   file=__import__("sys").stderr)
         if flowed <= limit * labelled:
             continue
+        if to_stops and not _has_cycle(g, [p for p in comp if st[p].reason in FLOWED_REASONS]):
+            continue    # spridningen bildar ett träd: ingen längdbudget; den stannar vid etikett, symbol eller gräns
         ident_key = s0.identity.key                 # read before the demotion below may blank the start prim
         caught: list[int] = []
         for pid in sorted(comp):

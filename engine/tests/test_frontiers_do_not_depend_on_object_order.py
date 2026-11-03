@@ -47,7 +47,8 @@ def test_the_frontiers_are_part_of_the_signature_and_survive_every_order(tmp_pat
     sig = semantic_signature(pa)
     assert sig["frontiers"], "fronterna ska stå i signaturen"
     reasons = {r for r, _, _ in sig["frontiers"]}
-    assert {"REAL_DN_BOUNDARY", "AMBIGUOUS_JUNCTION", "SYMBOL"} <= reasons, reasons
+    # grenen utan bevis ärver (SPEC 6.4.3 h.3) och ger ingen tvetydig korsning längre; det provet gäller är ordningen
+    assert {"REAL_DN_BOUNDARY", "SYMBOL"} <= reasons, reasons
     rep = run_determinism(doc, 0, base_pa=pa)
     assert rep["state"] == "PASS", rep
     assert len(set(rep["hashes"].values())) == 1

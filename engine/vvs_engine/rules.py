@@ -268,6 +268,15 @@ RULES: tuple[Rule, ...] = (
          "antal", 2, 1, 20, "layers", True),
 
     # ---- beteckningar ------------------------------------------------------------------------------------
+    Rule("pipes.ownership.PROPAGATE_TO_STOPS", G_OWN, "Spridning till stopp, grenar ärver",
+         "En etikett gäller längs röret tills ny etikett, symbol, dimensionsbyte eller entreprenadgräns, utan "
+         "längdbudget; en gren utan egen etikett ärver system och material med osäker dimension "
+         "(VS-Kalkyl SPEC 6.4.3 h.3). Av: flödesbudgeten och kravet på bevis i grenens ände gäller.",
+         "", True, None, None, None, True),
+    Rule("pipes.ownership.FLOW_MESH_CYCLES", G_OWN, "När spridd geometri är ett nät",
+         "Har det ett namn spridits in i så här många oberoende slingor är det ett nät - väggar, ett rutnät - och "
+         "längdbudgeten gäller där. En enda slinga kan vara en ledning som går runt och möter sig själv.",
+         "antal", 2, 1, 10, None, True),
     Rule("semantics.proximity.LEADERLESS_MM", G_LABEL, "Etikett utan ledare: hur nära röret",
          "En rörbeteckning utan ledare tillhör det närmaste rör som löper parallellt med texten, om det ligger "
          "så här nära på papperet (VS-Kalkyl SPEC 6.4.3 h.2).",
