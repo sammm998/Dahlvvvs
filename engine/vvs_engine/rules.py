@@ -285,6 +285,25 @@ RULES: tuple[Rule, ...] = (
          "längdbudget; en gren utan egen etikett ärver system och material med osäker dimension "
          "(VS-Kalkyl SPEC 6.4.3 h.3). Av: flödesbudgeten och kravet på bevis i grenens ände gäller.",
          "", True, None, None, None, True),
+    Rule("pipeline.GENERIC_SYSTEM_LAYER", G_OWN, "Disciplinens allmänna lager är rörlager",
+         "Ett lager som följer rörlagrens namnmall men har systemledet tomt (V-53-FE-_- bredvid V-53-FE-_S02-), med "
+         "samma penna, räknas som rörgeometri (namnges av etiketter som andra rör).",
+         "", True, None, None, None, True),
+    Rule("pipes.representation.SMALL_CLOSED_FIGURES_ARE_NOT_PIPE", G_OWN, "Sluten liten form är inte rör",
+         "En sluten väg i rörpennan som är högst SMALL_FIGURE_MAX_PT stor åt båda håll (pilspets, symbol) räknas "
+         "aldrig som rörlängd (beslut användare 2026-11-03: pilspetsar).",
+         "", True, None, None, None, True),
+    Rule("pipes.representation.SMALL_FIGURE_MAX_PT", G_OWN, "Största slutna form som inte är rör",
+         "Lådans största sida för en sluten form som räknas som pilspets eller symbol.", "pt", 12.0, 2.0, 40.0,
+         None, True),
+    Rule("pipes.representation.CLOSE_TOL_PT", G_OWN, "Sluten form",
+         "Så nära ska formens första och sista punkt ligga för att formen ska vara sluten.", "pt", 0.5, 0.05, 3.0,
+         None, True),
+    Rule("pipes.ownership.DEAD_END_LABEL_KEEPS_DN", G_OWN, "Återvändsgren behåller sin etiketts dimension",
+         "En etikett med dimension som pekar på en återvändsgren eller symbolen i dess ände, där grenen saknar annan "
+         "etikett, ger grenen etikettens dimension – före regeln att korsningens grövre dimension går in i en gren "
+         "som bara bär symboletiketter (beslut användare 2026-11-03). Av: korsningens dimension går före.",
+         "", True, None, None, None, True),
     Rule("pipes.ownership.CONTRACT_BOUNDARIES", G_OWN, "Entreprenadgräns kapar röret",
          "En not som ENTR. GRÄNS med ledare till ett rör kapar röret där; sidan utan egen etikett är utanför "
          "entreprenaden och räknas för sig, varken bekräftad eller otilldelad. Av: gränsnoter läses inte.",

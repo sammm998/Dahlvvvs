@@ -452,6 +452,8 @@ OUTSIDE_CONTRACT = "OUTSIDE_CONTRACT"
 OUTSIDE_REASON = "beyond_contract_boundary"
 BOUNDARY_CUT_REASON = "cut_at_contract_boundary"
 CONTRACT_BOUNDARIES = True
+DEAD_END_LABEL_KEEPS_DN = True
+DEAD_END_KEEPS_EVIDENCE = "dead_end_label_keeps_its_dn"
 
 
 def _side(g: PipeGraph, start_node: int, cut: int) -> tuple[set[int], set[int]]:
@@ -1808,6 +1810,14 @@ def _resolve_family(g: PipeGraph, st: dict[int, PrimState], seeds, ambiguous_run
                         reason = "junction_dn_completes_dn_less_label"
                     elif any(grp.strong for grp in groups_of.get(chain_of[v], [])):
                         reason = "through_junction_up_to_tick_boundary"
+                    elif (_R("pipes.ownership.DEAD_END_LABEL_KEEPS_DN", DEAD_END_LABEL_KEEPS_DN) and Y.dn is not None
+                          and info[v][1] and all(x == Y for grp in groups_of.get(chain_of[v], []) for x in grp.ids)):
+                        # beslut 2026-11-03: en etikett med dimension på en återvändsgren (eller symbolen i dess
+                        # ände), och ingen annan etikett på grenen, ger grenen etikettens dimension
+                        for p in todo:
+                            if DEAD_END_KEEPS_EVIDENCE not in st[p].evidence:
+                                st[p].evidence.append(DEAD_END_KEEPS_EVIDENCE)
+                        continue
                     else:
                         reason = "junction_dn_over_symbol_labels"
                     confirm(todo, merged if merged is not None else X, reason, src_aids)

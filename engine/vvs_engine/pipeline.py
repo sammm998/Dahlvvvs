@@ -2559,6 +2559,7 @@ def _is_an_apparatus_tag(d, legend) -> bool:
 # den ska ha visat sig känna igen innan den får göra det. Båda finns för att en lista som inte täcker bladets
 # rörordförråd aldrig ska kunna radera ett rör den bara råkat utelämna.
 LEGEND_MIN_ENTRIES = 8
+GENERIC_SYSTEM_LAYER = True
 LEGEND_MIN_KNOWN_HEADS = 3
 
 
@@ -2749,6 +2750,11 @@ def _generalize_families(page: RawPage, pipe_families: dict, graphs: dict, never
         toks = layer_tokens(layer)
         for (n, tpl) in templates:
             if len(toks) == n and all(t == "*" or t == toks[i] for i, t in enumerate(tpl)):
+                add.add(fk)
+            elif (_R("pipeline.GENERIC_SYSTEM_LAYER", GENERIC_SYSTEM_LAYER) and len(toks) == n - 1
+                  and tpl[-1] == "*" and all(t == toks[i] for i, t in enumerate(tpl[:-1]))):
+                # mallens lager med systemledet tomt (`V-53-FE-_-` bredvid `V-53-FE-_S02-`): disciplinens
+                # allmänna lager, där ritaren lagt delar av samma ledningar
                 add.add(fk)
     if add:
         prims = collect_prims(page, add)
