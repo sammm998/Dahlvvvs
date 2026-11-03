@@ -273,6 +273,23 @@ RULES: tuple[Rule, ...] = (
          "längdbudget; en gren utan egen etikett ärver system och material med osäker dimension "
          "(VS-Kalkyl SPEC 6.4.3 h.3). Av: flödesbudgeten och kravet på bevis i grenens ände gäller.",
          "", True, None, None, None, True),
+    Rule("pipes.ownership.CONTRACT_BOUNDARIES", G_OWN, "Entreprenadgräns kapar röret",
+         "En not som ENTR. GRÄNS med ledare till ett rör kapar röret där; sidan utan egen etikett är utanför "
+         "entreprenaden och räknas för sig, varken bekräftad eller otilldelad. Av: gränsnoter läses inte.",
+         "", True, None, None, None, True),
+    Rule("semantics.boundary.START_REACH", G_OWN, "Gränsnotens ledare börjar vid texten",
+         "Så nära notens textlåda, i texthöjder, måste ett streck börja för att vara notens ledare "
+         "(understrykningen ligger en bit under texten).",
+         "texthöjder", 0.5, 0.1, 2.0, None, True),
+    Rule("semantics.boundary.JOIN_TOL", G_OWN, "Ledarens streck sitter ihop",
+         "Två streck vars ändar ligger så nära varandra är en och samma ledare.",
+         "pt", 1.0, 0.1, 5.0, None, True),
+    Rule("semantics.boundary.MAX_STROKES", G_OWN, "En ledare är några få streck",
+         "Växer kedjan från noten till fler streck än så har den vuxit in i ritningen, och noten får ingen punkt.",
+         "antal", 6, 1, 50, None, True),
+    Rule("semantics.boundary.BOUNDARY_REACH", G_OWN, "Gränsledaren slutar vid röret",
+         "Så långt från röret får gränsnotens ledare sluta och ändå peka på det (som en fångad ledarände, h.1).",
+         "pt", 6.0, 0.0, 20.0, None, True),
     Rule("pipes.ownership.FLOW_MESH_CYCLES", G_OWN, "När spridd geometri är ett nät",
          "Har det ett namn spridits in i så här många oberoende slingor är det ett nät - väggar, ett rutnät - och "
          "längdbudgeten gäller där. En enda slinga kan vara en ledning som går runt och möter sig själv.",

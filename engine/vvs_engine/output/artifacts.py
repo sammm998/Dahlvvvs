@@ -351,6 +351,11 @@ def unresolved_issues(pa) -> list[dict]:
         elif a.state == "NO_PIPE_ATTACHMENT":
             issues.append({"kind": "missing_pipe_attachment", "text": a.designation, "reason": a.reason, "bbox": [a.endpoint[0] - 5, a.endpoint[1] - 5, a.endpoint[0] + 5, a.endpoint[1] + 5], "id": a.anchor_id})
     issues.extend(leaders_meeting_without_pipe(pa.anchors))
+    for u in (getattr(pa.ownership, "boundaries_undecided", None) or []) if pa.ownership else []:
+        x, y = u["point"]
+        issues.append({"kind": "contract_boundary_undecided", "text": u.get("note"), "reason": u["reason"],
+                       "point": u["point"], "bbox": [x - 5, y - 5, x + 5, y + 5],
+                       "id": f"boundary:{round(x, 1)},{round(y, 1)}"})
     for r in pa.ownership.ambiguous_runs:
         # An unresolved case is the least important thing in a reading and must never cost the reading itself.
         # A record naming a family or a primitive this graph does not hold is a defect worth seeing, not a
@@ -654,7 +659,8 @@ def sheet_reading(pa, doc, doc_legend=None, profile: dict | None = None,
                                          "in_hatched_area_m": round(sum(q.get("in_hatched_area_m", 0.0) for q in pa.quantities), 3),
                                          "riser_labels": sum(q.get("riser_count", 0) for q in pa.quantities)},
                               "hatched_areas": [h.as_dict() for h in pa.hatch_families],
-                              "risers": pa.risers}
+                              "risers": pa.risers,
+                              **outside_contract(pa)}
     out["unresolved-issues.json"] = {"issues": unresolved_issues(pa)}
     out["evidence-graph.json"] = evidence_graph(pa)
     from ..reconcile import reconcile
@@ -762,6 +768,32 @@ def extent_frontiers(pa) -> dict[str, Any]:
                      "class": "REAL" if d["reason"] in REAL else "LOSSY" if d["reason"] in LOSSY else "OPEN"})
     return {"page": pa.page.info.index, "reasons": REASONS, "classes": {"REAL": list(REAL), "LOSSY": list(LOSSY), "OPEN": list(OPEN)},
             "summary": sm, "frontiers": rows}
+
+
+OUTSIDE_CONTRACT_CATEGORY = "utanför entreprenadgräns"
+
+
+def outside_contract(pa) -> dict[str, Any]:
+    """Sträckor bortom en entreprenadgräns: en egen kategori, varken bekräftad eller otilldelad (pipes/ownership)."""
+    own = pa.ownership
+    if own is None:
+        return {"outside_contract": [], "outside_contract_m": 0.0, "contract_boundaries_undecided": []}
+    mpp = pa.scale.meters_per_pt if pa.scale and pa.scale.meters_per_pt else None
+    rows = []
+    for r in getattr(own, "outside_contract", []) or []:
+        g = pa.graphs.get(r["family"])
+        geom = [[[round(g.prims[p].seg.x0, 2), round(g.prims[p].seg.y0, 2)],
+                 [round(g.prims[p].seg.x1, 2), round(g.prims[p].seg.y1, 2)]] for p in r["prims"]] if g else []
+        if r.get("cut_segment") and r["cut_outside_pt"] > 0:
+            geom.append(r["cut_segment"])        # den del av den kapade biten som ligger bortom gränsen
+        rows.append({"category": OUTSIDE_CONTRACT_CATEGORY, "designation": r["designation"], "identity": r["identity"],
+                     "system": r["system"], "dn": r["dn"], "family": r["family"], "boundary_point": r["point"],
+                     "note": r["note"], "note_bbox": r["note_bbox"], "length_pt": round(r["length_pt"], 3),
+                     "length_m": None if mpp is None else round(r["length_pt"] * mpp, 3),
+                     "cut_outside_pt": round(r["cut_outside_pt"], 3), "geometry": geom})
+    return {"outside_contract": rows,
+            "outside_contract_m": round(sum(r["length_m"] or 0.0 for r in rows), 3),
+            "contract_boundaries_undecided": list(getattr(own, "boundaries_undecided", []) or [])}
 
 
 def named_by_confidence(anchor_ids, anchor_conf: dict[str, float] | None) -> float | None:

@@ -248,7 +248,7 @@ def review(pa, cross: dict[str, Any]) -> dict[str, Any]:
     from .pipes.representation import chains as graph_chains
     mpp = (pa.scale.meters_per_pt or 0.0) if pa.scale else 0.0
     unnamed: list[dict] = []
-    unowned_m = ambiguous_m = confirmed_m = 0.0
+    unowned_m = ambiguous_m = confirmed_m = outside_m = 0.0
     for fk, g in pa.graphs.items():
         states = pa.ownership.prim_states[fk]
         for c in graph_chains(g):
@@ -256,6 +256,7 @@ def review(pa, cross: dict[str, Any]) -> dict[str, Any]:
             confirmed_m += sum(g.prims[p].seg.length for p in c if states[p].state == "CONFIRMED") * mpp
             ambiguous_m += sum(g.prims[p].seg.length for p in c if states[p].state == "AMBIGUOUS") * mpp
             unowned_m += sum(g.prims[p].seg.length for p in c if states[p].state == "UNOWNED") * mpp
+            outside_m += sum(g.prims[p].seg.length for p in c if states[p].state == "OUTSIDE_CONTRACT") * mpp
             if all(states[p].state == "UNOWNED" for p in c) and L >= 0.5:
                 q = g.prims[c[0]].seg
                 unnamed.append({"family": fk, "n_primitives": len(c), "metres": round(L, 2),
@@ -274,13 +275,18 @@ def review(pa, cross: dict[str, Any]) -> dict[str, Any]:
         reasons[why[0]] += 1
         unplaced.append({"designation": d.display_text, "at": [round(d.bbox[0], 1), round(d.bbox[1], 1)],
                          "reason": why[0], "unknown_characters": d.unknown_chars})
-    total = confirmed_m + ambiguous_m + unowned_m
+    # den kapade biten vid en entreprenadgräns: delen bortom gränsen är utanför, inte bekräftad
+    cut = sum(r["cut_outside_pt"] for r in (getattr(pa.ownership, "outside_contract", None) or [])) * mpp
+    confirmed_m -= cut
+    outside_m += cut
+    total = confirmed_m + ambiguous_m + unowned_m + outside_m
     return {
         "pipe_geometry_m": round(total, 2),
         "named_m": round(confirmed_m, 2),
         "ambiguous_m": round(ambiguous_m, 2),
         "unnamed_m": round(unowned_m, 2),
-        "coverage_pct": round(100.0 * confirmed_m / total, 1) if total else None,
+        "outside_contract_m": round(outside_m, 2),
+        "coverage_pct": round(100.0 * confirmed_m / (total - outside_m), 1) if total - outside_m > 0 else None,
         "corroborated_m": cross["corroborated_m"],
         "one_reading_m": cross["one_reading_m"],
         "closure_only_m": cross["closure_only_m"],

@@ -110,6 +110,8 @@ class OwnershipResult:
     ambiguous_runs: list[dict]
     stats: dict[str, Any]
     riser_labels: dict[str, list[dict]] = field(default_factory=dict)   # identity key -> symbol-attached labels
+    outside_contract: list[dict] = field(default_factory=list)        # sträckor bortom en entreprenadgräns
+    boundaries_undecided: list[dict] = field(default_factory=list)    # gränser där sidan inte gick att avgöra
 
 
 def identity_of(a: PipeCodeAnchor, dn_token_index: int | None) -> Identity:
@@ -381,7 +383,8 @@ def _declared_by_join(g: PipeGraph, st: dict[int, "PrimState"], comp: list[int],
 def propagate(graphs: dict[str, PipeGraph], anchors: list[PipeCodeAnchor], page: int,
               identities: dict[str, Identity], spelled_out: frozenset[str] = frozenset(),
               declared=None, declared_max_pt: float | None = None,
-              end_evidence: dict[str, dict[int, dict]] | None = None) -> OwnershipResult:
+              end_evidence: dict[str, dict[int, dict]] | None = None,
+              boundaries: list | None = None) -> OwnershipResult:
     """identities: anchor_id -> Identity (only anchors that are verified AND belong to pipe-designation families).
     declared: the sheet's written rules for unlabelled pipes (semantics.declarations.DeclaredPipe), applied last
     and only to geometry every other reading left unowned.
@@ -416,9 +419,16 @@ def propagate(graphs: dict[str, PipeGraph], anchors: list[PipeCodeAnchor], page:
         ambiguous_runs = [r for r in ambiguous_runs
                           if states[r["family"]].get(r["from_prim"]) is None
                           or states[r["family"]][r["from_prim"]].state == "AMBIGUOUS"]
+    outside, undecided = _cut_at_boundaries(graphs, states, seeds, boundaries or [])
     pipes: list[PhysicalPipe] = []
     for fk, g in graphs.items():
         pipes.extend(_build_pipes(g, states[fk], fk, page))
+    for cut in outside:
+        # den del av den kapade rörbiten som ligger bortom gränsen hör inte till röret innanför
+        for p in pipes:
+            if p.family == cut["family"] and cut["cut_prim"] in p.prim_ids:
+                p.raw_length_pt = max(0.0, p.raw_length_pt - cut["cut_outside_pt"])
+                p.evidence = sorted({*p.evidence, BOUNDARY_CUT_REASON})
     pipes.sort(key=lambda p: p.physical_pipe_id)
     stats = Counter()
     for fk in graphs:
@@ -427,7 +437,94 @@ def propagate(graphs: dict[str, PipeGraph], anchors: list[PipeCodeAnchor], page:
     out = dict(stats)
     if given:
         out["declared_prims"] = sum(given.values())
-    return OwnershipResult(prim_states=states, pipes=pipes, ambiguous_runs=ambiguous_runs, stats=out)
+    return OwnershipResult(prim_states=states, pipes=pipes, ambiguous_runs=ambiguous_runs, stats=out,
+                           outside_contract=outside, boundaries_undecided=undecided)
+
+
+# ---------------------------------------------------------------- entreprenadgräns (semantics/boundary.py)
+#
+# En gränsnot pekar på en punkt på ett rör. Röret kapas där: allt som hänger ihop med punkten på den ena sidan
+# utan att passera den är den sidans. Den sida där ingen egen etikett sitter är utanför entreprenaden - om den
+# andra sidan har en. Sitter etiketter på båda sidor, eller på ingen, eller hänger sidorna ihop runt punkten,
+# avgörs inget och gränsen rapporteras. Det som är utanför får tillståndet OUTSIDE_CONTRACT: det räknas varken
+# som bekräftat eller som otilldelat.
+OUTSIDE_CONTRACT = "OUTSIDE_CONTRACT"
+OUTSIDE_REASON = "beyond_contract_boundary"
+BOUNDARY_CUT_REASON = "cut_at_contract_boundary"
+CONTRACT_BOUNDARIES = True
+
+
+def _side(g: PipeGraph, start_node: int, cut: int) -> tuple[set[int], set[int]]:
+    """Rörbitar och noder som nås från en nod utan att passera den kapade biten."""
+    prims: set[int] = set()
+    nodes = {start_node}
+    dq = deque([start_node])
+    while dq:
+        n = dq.popleft()
+        for q in g.nodes[n].prims:
+            if q == cut or q in prims:
+                continue
+            prims.add(q)
+            for m in g.prim_nodes[q]:
+                if m not in nodes:
+                    nodes.add(m)
+                    dq.append(m)
+    return prims, nodes
+
+
+def _cut_at_boundaries(graphs: dict[str, PipeGraph], states: dict[str, dict[int, PrimState]], seeds,
+                       boundaries: list) -> tuple[list[dict], list[dict]]:
+    outside: list[dict] = []
+    undecided: list[dict] = []
+    if not _R("pipes.ownership.CONTRACT_BOUNDARIES", CONTRACT_BOUNDARIES):
+        return outside, undecided
+    for b in boundaries:
+        if b.family is None or b.family not in graphs or b.prim_id not in graphs[b.family].prims:
+            undecided.append({"point": list(b.point), "note": b.note, "reason": "boundary_leader_reaches_no_pipe"})
+            continue
+        g, st, sd = graphs[b.family], states[b.family], seeds[b.family]
+        cut = g.prims[b.prim_id]
+        na, nb = g.prim_nodes[b.prim_id]
+        # vilken nod sitter i bitens början: noderna kan ha flyttats när grafen byggdes
+        a_first = (math.hypot(g.nodes[na].x - cut.seg.x0, g.nodes[na].y - cut.seg.y0)
+                   <= math.hypot(g.nodes[nb].x - cut.seg.x0, g.nodes[nb].y - cut.seg.y0))
+        start_node, end_node = (na, nb) if a_first else (nb, na)
+        _, t = point_seg_distance(b.point[0], b.point[1], cut.seg)
+        side_a, nodes_a = _side(g, start_node, b.prim_id)
+        side_b, nodes_b = _side(g, end_node, b.prim_id)
+        labelled_a = any(sd.get(p) for p in side_a) or any(
+            point_seg_distance(pt[0], pt[1], cut.seg)[1] < t for *_, pt in sd.get(b.prim_id, []))
+        labelled_b = any(sd.get(p) for p in side_b) or any(
+            point_seg_distance(pt[0], pt[1], cut.seg)[1] > t for *_, pt in sd.get(b.prim_id, []))
+        record = {"family": b.family, "point": [round(b.point[0], 2), round(b.point[1], 2)], "note": b.note,
+                  "note_bbox": [round(v, 2) for v in b.note_bbox], "cut_prim": b.prim_id}
+        if side_a & side_b or labelled_a == labelled_b:
+            why = ("the_run_joins_up_around_the_boundary" if side_a & side_b
+                   else "labels_on_both_sides" if labelled_a else "no_label_on_either_side")
+            undecided.append({**record, "reason": why})
+            continue
+        prims, nodes, frac = (side_a, nodes_a, t) if not labelled_a else (side_b, nodes_b, 1.0 - t)
+        idents = {st[p].identity for p in prims if st[p].identity is not None}
+        if st[b.prim_id].identity is not None:
+            idents.add(st[b.prim_id].identity)
+        ident = next(iter(idents)) if len(idents) == 1 else None
+        for p in prims:
+            prev = st[p]
+            st[p] = PrimState(state=OUTSIDE_CONTRACT, identity=prev.identity, reason=OUTSIDE_REASON,
+                              evidence=[OUTSIDE_REASON, *( [prev.reason] if prev.reason else [])])
+        gaps = 0.0
+        for br in g.bridges:
+            n = br.get("from_node")
+            if n in nodes and all(q in prims or q == b.prim_id for q in g.nodes[n].prims):
+                gaps += float(br.get("gap_pt") or 0.0)
+        cut_pt = frac * cut.seg.length
+        far = (cut.seg.x0, cut.seg.y0) if not labelled_a else (cut.seg.x1, cut.seg.y1)
+        cut_segment = [[round(b.point[0], 2), round(b.point[1], 2)], [round(far[0], 2), round(far[1], 2)]]
+        outside.append({**record, "prims": sorted(prims), "cut_outside_pt": cut_pt, "cut_segment": cut_segment,
+                        "length_pt": sum(g.prims[p].seg.length for p in prims) + gaps + cut_pt,
+                        "identity": ident.key if ident else None, "designation": ident.display if ident else None,
+                        "system": ident.system if ident else None, "dn": ident.dn if ident else None})
+    return outside, undecided
 
 
 # the two rules that carry an identity into geometry no label touched and no drawn boundary delimits

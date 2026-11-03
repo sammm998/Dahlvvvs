@@ -8,7 +8,7 @@ import pymupdf
 COLORS = {
     "confirmed": (0.0, 0.55, 0.0), "ambiguous": (1.0, 0.55, 0.0), "unowned": (0.6, 0.6, 0.6), "designation": (0.0, 0.3, 1.0),
     "leader": (0.8, 0.0, 0.8), "endpoint": (1.0, 0.0, 0.0), "no_attach": (1.0, 0.0, 0.0), "unsupported": (0.5, 0.0, 0.0),
-    "node": (0.0, 0.6, 0.6),
+    "node": (0.0, 0.6, 0.6), "outside_contract": (0.35, 0.2, 0.75),
 }
 
 
@@ -156,6 +156,18 @@ def _draw_production(page, shape, pa):
             shape.draw_polyline([_pt(page, x, y) for x, y in pts])
             shape.finish(color=COLORS["unowned"], width=2.6, lineCap=1, dashes="[3 2] 0", closePath=False)
     _draw_polylines(page, shape, _pipe_polylines(pa, "AMBIGUOUS"), COLORS["ambiguous"], 2.0)
+    # utanför entreprenadgräns: egen färg, streckad; gränspunkten som ett kryss
+    for pts in _pipe_polylines(pa, "OUTSIDE_CONTRACT"):
+        shape.draw_polyline([_pt(page, x, y) for x, y in pts])
+        shape.finish(color=COLORS["outside_contract"], width=2.6, lineCap=1, dashes="[1 1.5] 0", closePath=False)
+    for r in (getattr(pa.ownership, "outside_contract", None) or []):
+        if r.get("cut_segment"):
+            shape.draw_polyline([_pt(page, x, y) for x, y in r["cut_segment"]])
+            shape.finish(color=COLORS["outside_contract"], width=2.6, lineCap=1, dashes="[1 1.5] 0", closePath=False)
+        x, y = r["point"]
+        shape.draw_line(_pt(page, x - 3, y - 3), _pt(page, x + 3, y + 3))
+        shape.draw_line(_pt(page, x - 3, y + 3), _pt(page, x + 3, y - 3))
+        shape.finish(color=COLORS["outside_contract"], width=0.9)
     # legend
     y = 14.0
     seen = {}
@@ -167,6 +179,11 @@ def _draw_production(page, shape, pa):
         y += 7
     shape.draw_line(_pt(page, 8, y), _pt(page, 28, y)); shape.finish(color=COLORS["unowned"], width=2.4, dashes="[3 2] 0")
     shape.insert_text(_pt(page, 31, y + 1.5), "i skrafferat omrade (vagg), ej i mangd", fontsize=4.5, color=(0, 0, 0))
+    if getattr(pa.ownership, "outside_contract", None):
+        y += 7
+        shape.draw_line(_pt(page, 8, y), _pt(page, 28, y))
+        shape.finish(color=COLORS["outside_contract"], width=2.4, dashes="[1 1.5] 0")
+        shape.insert_text(_pt(page, 31, y + 1.5), "utanfor entreprenadgrans, ej i mangd", fontsize=4.5, color=(0, 0, 0))
     for d in pa.designations:
         if any(a.designation_id == d.did and a.state == "VERIFIED_PIPE_ATTACHMENT" for a in pa.anchors):
             shape.draw_rect(_rect(page, d.bbox)); shape.finish(color=COLORS["designation"], width=0.5)

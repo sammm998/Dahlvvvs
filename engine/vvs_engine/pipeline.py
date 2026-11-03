@@ -29,6 +29,8 @@ from .semantics.annotation import (AnnotationBlock, Designation, build_blocks, e
                                     free_segments, merge_lines, one_reading_per_place)
 from .text.model import project, row_axes
 from .semantics.proximity import leaderless_anchors
+from .semantics.boundary import find_contract_boundaries
+from .pipes.ink import is_stroked
 from .semantics.attachment import (GeometryIndex, PathsByPlace, PipeCodeAnchor, family_of, layer_system_tokens,
                                    leader_contacts, resolve_block, system_layer_match)
 from .semantics.legend import (DrawingLegend, adopt, assign_roles, number_as_listed, opens_with, read_legend,
@@ -1951,22 +1953,29 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
                 # labels as native_label_<id>, and the viewer lights exactly those when the pipe is picked
                 'labels': _native_label_marks(native)}
     else:
+        # entreprenadgränser: noter med en kort ledare till ett rör (semantics/boundary.py)
+        strokes = [sg for p in page.paths if is_stroked(p) and family_of(p) not in graphs for sg in p.segs]
+        contract_boundaries = find_contract_boundaries(page.info.index, blocks, strokes, graphs)
         ownership = propagate(graphs, anchors, page.info.index, identities, spelled_out,
-                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev)
+                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev,
+                              boundaries=contract_boundaries)
         if _settle_bundles_by_elimination(anchors, ownership, graphs):
             identities = _identities_now()
             ownership = propagate(graphs, anchors, page.info.index, identities, spelled_out,
-                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev)
+                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev,
+                              boundaries=contract_boundaries)
         # and what one bundle at a time cannot settle, the sheet taken as a whole sometimes can
         if settle_bundles_by_sheet_consistency(anchors, graphs, known_families):
             identities = _identities_now()
             ownership = propagate(graphs, anchors, page.info.index, identities, spelled_out,
-                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev)
+                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev,
+                              boundaries=contract_boundaries)
         # ...and last, what the sheet's own settled bundles say about the order its rows are written in
         if _settle_bundles_by_the_sheets_own_row_order(anchors, page):
             identities = _identities_now()
             ownership = propagate(graphs, anchors, page.info.index, identities, spelled_out,
-                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev)
+                              declared=declarations.connection_pipes, declared_max_pt=declared_max_pt, end_evidence=end_ev,
+                              boundaries=contract_boundaries)
         _close_labels_on_owned_runs(anchors, ownership, graphs)
     film.pipes(ownership.pipes)
     t0 = _t(timings, "physical_pipes_ms", t0)
@@ -2823,15 +2832,20 @@ def reading_coverage(pa: PageAnalysis) -> dict[str, Any]:
         return name in measured or any(m.startswith(name + "-") or name.startswith(m + "-") for m in measured)
 
     got = {n for n in named if carried(n)}
-    ink = {"drawn_pt": 0.0, "confirmed_pt": 0.0, "ambiguous_pt": 0.0, "unowned_pt": 0.0}
+    ink = {"drawn_pt": 0.0, "confirmed_pt": 0.0, "ambiguous_pt": 0.0, "unowned_pt": 0.0, "outside_contract_pt": 0.0}
     for fk, g in (pa.graphs or {}).items():
         states = (pa.ownership.prim_states if pa.ownership else {}).get(fk, {})
         for pid, prim in g.prims.items():
             L = prim.seg.length
             ink["drawn_pt"] += L
             st = states.get(pid)
-            key = {"CONFIRMED": "confirmed_pt", "AMBIGUOUS": "ambiguous_pt"}.get(getattr(st, "state", ""), "unowned_pt")
+            key = {"CONFIRMED": "confirmed_pt", "AMBIGUOUS": "ambiguous_pt",
+                   "OUTSIDE_CONTRACT": "outside_contract_pt"}.get(getattr(st, "state", ""), "unowned_pt")
             ink[key] += L
+    # den kapade biten vid en entreprenadgräns: delen bortom gränsen är utanför, inte bekräftad
+    cut = sum(r["cut_outside_pt"] for r in (getattr(pa.ownership, "outside_contract", None) or []))
+    ink["confirmed_pt"] -= cut
+    ink["outside_contract_pt"] += cut
     # Utan skala finns inga meter att redovisa - och noll meter är inte svaret. Ett blad vars skala aldrig blev
     # fastställd har ritat rör i punkter men ingen omräkning till meter, och att då skriva "0 m ritat rör" säger
     # att bladet är tomt när sanningen är att frågan inte gick att besvara. Metertalen lämnas därför som None,
@@ -2852,6 +2866,7 @@ def reading_coverage(pa: PageAnalysis) -> dict[str, Any]:
         "missed": [{"name": n, "rects": places[n][:6]} for n in sorted(missing)][:60] if places else [],
         "drawn_m": metres(ink["drawn_pt"]), "confirmed_m": metres(ink["confirmed_pt"]),
         "ambiguous_m": metres(ink["ambiguous_pt"]), "unowned_m": metres(ink["unowned_pt"]),
+        "outside_contract_m": metres(ink["outside_contract_pt"]),
         "drawn_pt": round(ink["drawn_pt"], 2), "confirmed_pt": round(ink["confirmed_pt"], 2),
         "ambiguous_pt": round(ink["ambiguous_pt"], 2), "unowned_pt": round(ink["unowned_pt"], 2),
         "scale_state": (pa.scale.state if pa.scale else "NONE"),
