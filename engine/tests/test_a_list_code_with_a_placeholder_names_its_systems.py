@@ -47,3 +47,21 @@ def test_the_list_names_the_pipes_the_sheet_writes_with_its_placeholder():
     assert roles["KBXX-3"] == "system" and roles["VSXX-22"] == "system", roles
     assert all(legend.names_a_pipe(d) for d in labels)
     assert legend.role_of_head("VS02-22-12") == "system"
+
+
+def test_a_placeholder_code_is_a_system_even_when_its_words_name_a_material_and_no_label_uses_it():
+    # KBXX-6 KÖLDBÄRARE, ROSTFRITT STÅL: orden låter som ett material, men XX står för systemnumret
+    from vvs_engine.rules import using
+
+    def roles(on):
+        legend = DrawingLegend(entries=[_entry("KBXX-6", "KÖLDBÄRARE, ROSTFRITT STÅL", 100),
+                                        _entry("VSXX-2", "VÄRMEBÄRARE, SEKUNDÄR STÅLRÖR", 110),
+                                        _entry("BV", "BACKVENTIL", 120), _entry("BXXX", "GOLVBRUNN, STÅL", 130)])
+        with using({"semantics.legend.PLACEHOLDER_IS_SYSTEM": on}):
+            assign_roles(legend, [])
+        return {e.code: e.role for e in legend.entries}
+
+    on = roles(True)
+    assert on["KBXX-6"] == on["VSXX-2"] == "system" and on["BV"] == "component"
+    assert on["BXXX"] != "system"                     # en objektmall, där XXX är löpnumret
+    assert roles(False)["KBXX-6"] != "system"

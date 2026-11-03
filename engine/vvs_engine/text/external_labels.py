@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import statistics
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..geometry.core import GridIndex, bbox_union, stable_id
+from ..rules import value as _R
 from .model import Glyph, TextRow, project, row_axes
 
 ARTIFACT_SCHEMA = "vvs_engine.external_labels/1"
@@ -54,6 +56,7 @@ class ExternalLabel:
     flags: tuple[str, ...] = ()
     method: str = ""
     min_confidence: float = MIN_CONFIDENCE    # läsarens egen tröskel (etikettfilens _meta.min_read_confidence)
+    has_ink: bool | None = None               # None = bläcket inte prövat; False = inget bläck i lådan
 
     @property
     def uncertain(self) -> bool:
@@ -221,6 +224,38 @@ def _line_for(label: ExternalLabel, mine: list[TextRow], page: int, default_sour
                    protected=not label.uncertain)
 
 
+SPLIT_PIPE_LISTS = True
+_LIST_SEP = re.compile(r"\s*[,/;]\s*")
+_LIST_PART = re.compile(r"^[A-ZÅÄÖ]{1,4}\d{0,3}(?:-[A-Z0-9]{1,4})*-?$")
+_TRAILING_DN = re.compile(r"-(\d{1,4}[A-Z]?)$")
+
+
+def split_pipe_lists(labels: list[ExternalLabel]) -> list[ExternalLabel]:
+    """En rörlista på en rad (`KV02-53-,VV02-53-20`, `KV01-53-20,VV01-53-20,VVC01-53-16`) är flera rör i samma
+    knippe, precis som ett staplat block. Varje led blir en egen rad, staplad i listans ordning inom etikettens låda;
+    ett led utan dimension (`KV02-53-`) ärver dimensionen från listans sista led. En text som inte består av
+    rörbeteckningar (`ANSL. HÖGTRYCK, SPOLSLANG`) delas inte."""
+    if not _R("text.external_labels.SPLIT_PIPE_LISTS", SPLIT_PIPE_LISTS):
+        return labels
+    out: list[ExternalLabel] = []
+    for lb in labels:
+        parts = [p for p in _LIST_SEP.split(lb.text.strip().upper()) if p]
+        if len(parts) < 2 or not all(_LIST_PART.match(p) and "-" in p for p in parts):
+            out.append(lb)
+            continue
+        last = _TRAILING_DN.search(parts[-1])
+        if last is None:
+            out.append(lb)
+            continue
+        x0, y0, x1, y1 = lb.bbox
+        h = (y1 - y0) / len(parts)
+        for i, p in enumerate(parts):
+            text = p if _TRAILING_DN.search(p) else p.rstrip("-") + "-" + last.group(1)
+            out.append(replace(lb, text=text, bbox=(x0, y0 + i * h, x1, y0 + (i + 1) * h),
+                               flags=(*lb.flags, "split_from_pipe_list")))
+    return out
+
+
 def _one_per_place(labels: list[ExternalLabel]) -> list[ExternalLabel]:
     """En läsning per ställe: en etikett på samma ställe som en längre, vars text den är en del av, är ett
     fragment av den (text som skars av en bits kant) och används inte. Två stackade rader med samma text skulle
@@ -243,16 +278,15 @@ def apply_external_labels(lines: list[TextRow], labels: list[ExternalLabel], pag
         return lines, report
     labels = sorted(labels, key=lambda lb: (round(lb.bbox[1], 1), round(lb.bbox[0], 1), lb.text))
     # lådorna dras åt till bläcket före allt annat, så att en för stor låda varken tar en grannrad eller ett rör
-    inked: list[bool] = []
     if ink is not None:
         tight = [ink.inside(lb.bbox) for lb in labels]
-        inked = [t is not None for t in tight]
-        labels = [replace(lb, bbox=t) if t is not None else lb for lb, t in zip(labels, tight)]
+        labels = [replace(lb, bbox=t, has_ink=True) if t is not None else replace(lb, has_ink=False)
+                  for lb, t in zip(labels, tight)]
     # `=` mellan en kod och dess beskrivning i bladets lista, ett ensamt `-`: tecken, inte ord. Motorn läser dem
     # inte som text, och en sådan rad mellan kod och beskrivning gör att listan inte känns igen.
     words = [lb for lb in labels if any(c.isalnum() for c in lb.text)]
     report.symbols = len(labels) - len(words)
-    labels = _one_per_place(words)
+    labels = _one_per_place(split_pipe_lists(words))
     # varje motorrad till den etikett den överlappar mest
     owner: dict[int, int] = {}
     for i, ln in enumerate(lines):
@@ -282,7 +316,7 @@ def apply_external_labels(lines: list[TextRow], labels: list[ExternalLabel], pag
                 report.uncertain += 1
                 report.uncertain_rids.update(r.rid for r in mine)
             continue
-        if inked and not inked[j] and not mine:
+        if lb.has_ink is False and not mine:
             report.no_ink += 1          # varken motorn eller bläcket bär den här texten
             continue
         new = _line_for(lb, mine, page, default_source)

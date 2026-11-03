@@ -172,6 +172,18 @@ RULES: tuple[Rule, ...] = (
          "pt", 8.0, 0.0, 30.0, None, True),
 
     # ---- förklaringslistan -------------------------------------------------------------------------------
+    Rule("text.external_labels.SPLIT_PIPE_LISTS", G_LABEL, "Rörlista på en rad blir ett knippe",
+         "En extern etikett som är en lista av rörbeteckningar (KV02-53-,VV02-53-20) delas i en rad per rör, "
+         "staplade i listans ordning; ett led utan dimension ärver listans sista dimension.",
+         "", True, None, None, None, True),
+    Rule("semantics.legend.PLACEHOLDER_IS_SYSTEM", G_LEGEND, "En kod med platshållare är ett system",
+         "En listkod med XX för systemnumret (KBXX-6, VSXX-2) är en mall för rörbeteckningar, även när beskrivningen "
+         "nämner materialet. Av: rollen tas ur beskrivningens ord.",
+         "", True, None, None, None, True),
+    Rule("semantics.legend.PIPE_SIZES_ONLY", G_LEGEND, "Bara rördimensioner gör en text till ett rör",
+         "En beteckning vars dimension inte är en dimension som rör tillverkas i (t.ex. V50-02-271, en hänvisning "
+         "till en annan ritning) namnger inget rör. Av: varje tal efter koden räknas som dimension.",
+         "", True, None, None, None, True),
     Rule("semantics.legend.MIN_ENTRIES", G_LEGEND, "Kortaste lista som är en lista",
          "Hur många rader en kolumn av koder måste ha för att räknas som handlingens förklaringslista och inte "
          "som en tabellcell eller en notering.",
