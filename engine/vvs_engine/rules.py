@@ -268,6 +268,20 @@ RULES: tuple[Rule, ...] = (
          "antal", 2, 1, 20, "layers", True),
 
     # ---- beteckningar ------------------------------------------------------------------------------------
+    Rule("semantics.proximity.LEADERLESS_MM", G_LABEL, "Etikett utan ledare: hur nära röret",
+         "En rörbeteckning utan ledare tillhör det närmaste rör som löper parallellt med texten, om det ligger "
+         "så här nära på papperet (VS-Kalkyl SPEC 6.4.3 h.2).",
+         "mm", 6.0, 0.0, 20.0, None, True),
+    Rule("semantics.proximity.PARALLEL_DEG", G_LABEL, "Etikett utan ledare: hur parallellt",
+         "Så mycket får röret avvika från textens riktning och ändå räknas som det röret etiketten skrivits längs.",
+         "grader", 10.0, 0.0, 45.0, None, True),
+    Rule("semantics.proximity.AMBIGUITY_RATIO", G_LABEL, "Etikett utan ledare: när två rör är lika nära",
+         "Ligger ett annat rör högst så här många gånger så långt bort som det närmaste är tilldelningen "
+         "tvetydig och ingen meter bekräftas.",
+         "gånger", 1.5, 1.0, 5.0, None, True),
+    Rule("semantics.proximity.CONFIDENCE", G_LABEL, "Etikett utan ledare: konfidens",
+         "Hur säker en tilldelning utan ledare är (en ledare ger 0,95).",
+         "andel", 0.8, 0.0, 1.0, None, True),
     Rule("pipeline.LABELS_MUST_REACH", G_LABEL, "Hur mycket en läsning måste nå",
          "Andelen av bladets rörbeteckningar som måste nå ett rör för att läsningen ska räknas som den rätta av "
          "två möjliga läsningar av bladet.",

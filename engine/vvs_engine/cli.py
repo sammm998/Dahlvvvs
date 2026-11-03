@@ -290,6 +290,8 @@ def analyze_pdf(pdf_path: str, out_dir: str, name: str | None = None, determinis
     timings["total_s"] = time.perf_counter() - t_all
     config = dict(CONFIG)
     config["layer_name_families"] = {None: "auto", True: "on", False: "off"}[layer_name_families]
+    from . import rules as _rules
+    config["rule_overrides"] = dict(sorted(_rules._OVERRIDES.get().items()))
     if external_labels is not None:
         config["external_labels"] = {"sha256": external_labels.sha256, "reader": external_labels.meta,
                                      "pages": sorted(external_labels.by_page)}
@@ -332,6 +334,9 @@ def main(argv=None):
     a.add_argument("pdf"); a.add_argument("--out", required=True); a.add_argument("--name")
     a.add_argument("--no-determinism", action="store_true"); a.add_argument("--no-contamination", action="store_true")
     a.add_argument("--labels", help="etiketter lästa av en annan läsare (JSON, se vvs_engine/text/external_labels.py)")
+    a.add_argument("--rule", action="append", default=[], metavar="ID=VÄRDE",
+                   help="ställ en inställbar regel för den här läsningen (vvs_engine/rules.py), t.ex. "
+                        "semantics.proximity.LEADERLESS_MM=6")
     a.add_argument("--layer-name-families", choices=("auto", "on", "off"), default="auto",
                    help="lagerregeln: auto = bara på blad med etikettfil (standard)")
     w = sub.add_parser("why", help="evidence chain for a physical pipe id (re-analyzes the PDF)")
@@ -345,9 +350,17 @@ def main(argv=None):
         if args.labels:
             from .text.external_labels import ExternalLabels
             labels = ExternalLabels.load(args.labels)
-        s = analyze_pdf(args.pdf, args.out, args.name, not args.no_determinism, not args.no_contamination, progress=lambda st: print(f"[{st}]", file=sys.stderr),
-                        external_labels=labels,
-                        layer_name_families={"auto": None, "on": True, "off": False}[args.layer_name_families])
+        from . import rules as _rules
+        overrides = {}
+        for item in args.rule:
+            rid, _, raw = item.partition("=")
+            if rid not in _rules.BY_ID or not _rules.BY_ID[rid].tunable:
+                ap.error(f"--rule {rid}: ingen inställbar regel med det id:t")
+            overrides[rid] = type(_rules.BY_ID[rid].default)(raw)
+        with _rules.using(overrides):
+            s = analyze_pdf(args.pdf, args.out, args.name, not args.no_determinism, not args.no_contamination,
+                            progress=lambda st: print(f"[{st}]", file=sys.stderr), external_labels=labels,
+                            layer_name_families={"auto": None, "on": True, "off": False}[args.layer_name_families])
         print(json.dumps(s["summary"], indent=1, default=str)); return 0
     if args.cmd == "why":
         doc = extract_document(args.pdf)

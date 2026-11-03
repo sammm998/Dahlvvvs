@@ -28,6 +28,7 @@ from .profile.hatch import HatchFamily, discover_hatch, inside_hatch
 from .semantics.annotation import (AnnotationBlock, Designation, build_blocks, extract_designations,
                                     free_segments, merge_lines, one_reading_per_place)
 from .text.model import project, row_axes
+from .semantics.proximity import leaderless_anchors
 from .semantics.attachment import (GeometryIndex, PathsByPlace, PipeCodeAnchor, family_of, layer_system_tokens,
                                    leader_contacts, resolve_block, system_layer_match)
 from .semantics.legend import (DrawingLegend, adopt, assign_roles, number_as_listed, opens_with, read_legend,
@@ -1550,6 +1551,11 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
             if not contacts and ld.length < 2.5 * max(block.height, 1.0) and not ld.end_marks:
                 continue        # dangling frame stub, not a leader
             anchors.extend(resolve_block(block, rows, ld, contacts, system_tokens, spelled_out, paths, gidx))
+        # En rörbeteckning utan ledare tillhör det närmaste parallella röret (VS-Kalkyl SPEC 6.4.3 h.2).
+        if pf:
+            anchors.extend(leaderless_anchors(
+                designations, pipe_labels, {ld.block_id for ld in leaders}, {a.designation_id for a in anchors},
+                {f: graphs[f] for f in pf if f in graphs}))
         anchors.sort(key=lambda a: a.anchor_id)
         stats = {"votes": dict(votes.most_common()), "token_votes": dict(token_votes.most_common()), "candidate_families": sorted(pipe_families), "tick_votes": dict(tick_votes.most_common()),
                  "leader_votes": dict(leader_votes.most_common()), "declined_families": declined,
@@ -1583,8 +1589,9 @@ def analyze_page(page: RawPage, progress: Callable[[str], None] | None = None, o
     for a in anchors:
         if a.state != "VERIFIED_PIPE_ATTACHMENT":
             continue
-        ld = next(l for l in leaders if l.lid == a.leader_id)
-        ann_layers[stroke_family(ld.layer, ld.width, ld.color)] += 1
+        ld = next((l for l in leaders if l.lid == a.leader_id), None)
+        if ld is not None:          # en etikett utan ledare (semantics/proximity.py) har ingen ledarpenna
+            ann_layers[stroke_family(ld.layer, ld.width, ld.color)] += 1
         b = block_by_id[a.block_id]
         for r in b.rows:
             for u in r.underline:
