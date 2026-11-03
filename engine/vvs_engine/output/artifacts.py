@@ -641,7 +641,8 @@ def sheet_reading(pa, doc, doc_legend=None, profile: dict | None = None,
     out["pipe-topology.json"] = {"families": [{"family": fk, "nodes": [{"id": n.nid, "x": round(n.x, 2), "y": round(n.y, 2), "degree": n.degree, "prims": n.prims} for n in g.nodes.values()],
                                                "edges": [{"prim": pid, "a": ab[0], "b": ab[1]} for pid, ab in g.prim_nodes.items()], "bridges": g.bridges, "junctions": g.junctions, "gap_mode": g.gap_mode}
                                               for fk, g in pa.graphs.items()]}
-    out["physical-pipes.json"] = {"physical_pipes": [physical_pipe_dict(m) for m in pa.measures]}
+    anchor_conf = {a.anchor_id: a.evidence["confidence"] for a in pa.anchors if "confidence" in (a.evidence or {})}
+    out["physical-pipes.json"] = {"physical_pipes": [physical_pipe_dict(m, anchor_conf) for m in pa.measures]}
     out["pipe-extent-frontiers.json"] = extent_frontiers(pa)
     out["quantities.json"] = {"scale": pa.scale.as_dict(), "rows": pa.quantities,
                               "totals": {"physical_pipes": len(pa.measures),
@@ -763,8 +764,23 @@ def extent_frontiers(pa) -> dict[str, Any]:
             "summary": sm, "frontiers": rows}
 
 
-def physical_pipe_dict(m) -> dict[str, Any]:
+def named_by_confidence(anchor_ids, anchor_conf: dict[str, float] | None) -> float | None:
+    """Konfidensen i det som namnger röret, när bara svagare tilldelningar gör det (SPEC 6.4.3 h.1-h.2).
+
+    En egen ledare som rör vid röret har ingen sådan siffra - den är full bevisning. Namnges röret bara av etiketter
+    utan ledare (0,8) eller av ledare som fångats strax före röret (0,7), gäller den bästa av dem.
+    """
+    if not anchor_conf or not anchor_ids or any(a not in anchor_conf for a in anchor_ids):
+        return None
+    return max(anchor_conf[a] for a in anchor_ids)
+
+
+def physical_pipe_dict(m, anchor_conf: dict[str, float] | None = None) -> dict[str, Any]:
     p = m.pipe
+    named_by = named_by_confidence(p.anchor_ids, anchor_conf)
+    ctier = tier(p.evidence, bool(getattr(p, "needs_review", False)), getattr(p, "flags", ()))
+    if named_by is not None and ctier == "sure":
+        ctier = "inferred"        # en etikett utan egen ledare på röret är aldrig säker
     return {"physical_pipe_id": p.physical_pipe_id, "page": p.page, "system": p.identity.system, "designation": p.identity.display,
             "identity": p.identity.key, "dn": p.identity.dn, "supporting_anchors": p.anchor_ids, "representation_family": p.family, "section_levels": p.section_levels,
             "geometry": [[[round(x, 2), round(y, 2)] for x, y in pl] for pl in p.points], "source_path_ids": p.source_paths,
@@ -775,7 +791,7 @@ def physical_pipe_dict(m) -> dict[str, Any]:
             "total_m": None if m.total_m is None else round(m.total_m, 3), "evidence_state": m.state, "evidence": p.evidence,
             "in_hatched_area_m": None if m.hatched_m is None else round(m.hatched_m, 3),
             "ambiguity_reason": None, "reasons": m.reasons, "needs_review": bool(getattr(p, "needs_review", False)),
-            "confidence_tier": tier(p.evidence, bool(getattr(p, "needs_review", False)), getattr(p, "flags", ())),
+            "confidence_tier": ctier, "anchor_confidence": named_by,
             "flags": list(getattr(p, "flags", ()) or ()),
             "frontier_reasons": list(p.frontier_reasons), "frontiers": list(getattr(p, "frontiers", []) or [])}
 

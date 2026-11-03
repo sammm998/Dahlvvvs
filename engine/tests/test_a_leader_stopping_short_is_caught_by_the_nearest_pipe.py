@@ -7,7 +7,7 @@ konfidens 0,7. Flera etiketter vars ledare slutar i en punkt där inget rör fin
 from types import SimpleNamespace
 
 from vvs_engine.geometry.core import Seg
-from vvs_engine.output.artifacts import leaders_meeting_without_pipe
+from vvs_engine.output.artifacts import leaders_meeting_without_pipe, named_by_confidence
 from vvs_engine.pdf.extract import RawPath
 from vvs_engine.rules import using
 from vvs_engine.semantics.annotation import AnnotationBlock, BlockRow
@@ -100,3 +100,11 @@ def test_two_leaders_are_not_yet_a_meeting():
     assert leaders_meeting_without_pipe(anchors) == []
     with using({"output.artifacts.LEADERS_MEET_MIN": 2}):
         assert len(leaders_meeting_without_pipe(anchors)) == 1
+
+
+def test_a_pipe_named_only_by_weaker_assignments_carries_their_confidence():
+    conf = {"cap": 0.7, "prox": 0.8}
+    assert named_by_confidence(["cap"], conf) == 0.7
+    assert named_by_confidence(["cap", "prox"], conf) == 0.8          # den bästa som namnger röret
+    assert named_by_confidence(["cap", "leader"], conf) is None       # en egen ledare är full bevisning
+    assert named_by_confidence([], conf) is None
